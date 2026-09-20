@@ -1,0 +1,10 @@
+[package]
+name = "rustuo-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rustuo-core = { path = "../rustuo-core" }
+rustuo-protocol = { path = "../rustuo-protocol" }
+rustuo-world = { path = "../rustuo-world" }
