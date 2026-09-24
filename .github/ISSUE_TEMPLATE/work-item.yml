@@ -1,1 +1,33 @@
-
+name: RustUO work item
+description: Propose a concrete change for RustUO.
+title: "[Work] "
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What outcome should this issue track?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include relevant code, protocol, or legacy behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List the observable results needed to close this issue.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Which tests or checks should demonstrate completion?
+      placeholder: cargo test --workspace
+    validations:
+      required: false
