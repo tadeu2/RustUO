@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod account_repository;
+
 /// Application port for account credential verification.
 ///
 /// Implementations receive borrowed raw bytes and are independent of storage
