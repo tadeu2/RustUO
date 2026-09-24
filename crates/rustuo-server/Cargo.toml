@@ -8,3 +8,7 @@ license.workspace = true
 rustuo-core = { path = "../rustuo-core" }
 rustuo-protocol = { path = "../rustuo-protocol" }
 rustuo-world = { path = "../rustuo-world" }
+quick-xml = "0.42.0"
+md-5 = "0.11.0"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
