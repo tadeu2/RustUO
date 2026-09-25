@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account_repository;
+pub mod reconnect_admission;
 
 /// Application port for account credential verification.
 ///
