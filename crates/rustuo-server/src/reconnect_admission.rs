@@ -110,14 +110,48 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rustuo_protocol::RenaissanceGameLogin;
 
+    use crate::account_repository::{
+        LegacyAccountError, LegacyAccountIdentity, LegacyXmlAccountRepository,
+        RepositoryCredentialVerifier,
+    };
     use crate::ReconnectCredentialVerifier;
 
     use super::{
         admit_renaissance_reconnect, AuthIdIssuer, ReconnectAdmissionError, ReconnectGrantWindow,
+        RenaissanceReconnectAdmission,
     };
+
+    static NEXT_XML_FILE: AtomicUsize = AtomicUsize::new(0);
+
+    struct XmlFile(PathBuf);
+
+    impl XmlFile {
+        fn new(contents: &str) -> Self {
+            let sequence = NEXT_XML_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "rustuo-reconnect-admission-{}-{sequence}.xml",
+                std::process::id()
+            ));
+            fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for XmlFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
 
     struct FixedIssuer {
         ids: VecDeque<u32>,
@@ -165,6 +199,17 @@ mod tests {
         };
         assert_eq!(grants.issue(version, &mut issuer), Ok(auth_id));
         grants
+    }
+
+    fn legacy_repository_verifier(
+        xml: &str,
+    ) -> (
+        XmlFile,
+        RepositoryCredentialVerifier<LegacyXmlAccountRepository>,
+    ) {
+        let file = XmlFile::new(xml);
+        let repository = LegacyXmlAccountRepository::open(file.path()).unwrap();
+        (file, RepositoryCredentialVerifier::new(repository))
     }
 
     #[test]
@@ -219,5 +264,57 @@ mod tests {
             Err(ReconnectAdmissionError::UnknownAuthId { auth_id: 42 })
         );
         assert_eq!(verifier.calls, 1);
+    }
+
+    #[test]
+    fn legacy_xml_account_is_admitted_with_stored_identity_and_exact_grant_version() {
+        let (file, mut verifier) = legacy_repository_verifier(
+            "<accounts><account><username>Alice</username><password>secret</password></account></accounts>",
+        );
+        let original_xml = fs::read(file.path()).unwrap();
+        let version = 0x0508_0003;
+        let mut grants = grant(version, 42);
+        let login = RenaissanceGameLogin {
+            auth_id: 42,
+            username: b"Alice",
+            password: b"secret",
+        };
+
+        let admission = admit_renaissance_reconnect(login, &mut grants, &mut verifier);
+
+        assert_eq!(
+            admission,
+            Ok(RenaissanceReconnectAdmission {
+                client_version: version,
+                account: LegacyAccountIdentity::new("Alice"),
+            })
+        );
+        assert_eq!(fs::read(file.path()).unwrap(), original_xml);
+    }
+
+    #[test]
+    fn legacy_xml_credential_failure_consumes_grant_and_replay_is_rejected() {
+        let (file, mut verifier) = legacy_repository_verifier(
+            "<accounts><account><username>Alice</username><password>secret</password></account></accounts>",
+        );
+        let original_xml = fs::read(file.path()).unwrap();
+        let mut grants = grant(0x0508_0003, 42);
+        let login = RenaissanceGameLogin {
+            auth_id: 42,
+            username: b"Alice",
+            password: b"incorrect",
+        };
+
+        assert_eq!(
+            admit_renaissance_reconnect(login, &mut grants, &mut verifier),
+            Err(ReconnectAdmissionError::VerifierFailed(
+                LegacyAccountError::PasswordMismatch
+            ))
+        );
+        assert_eq!(
+            admit_renaissance_reconnect(login, &mut grants, &mut verifier),
+            Err(ReconnectAdmissionError::UnknownAuthId { auth_id: 42 })
+        );
+        assert_eq!(fs::read(file.path()).unwrap(), original_xml);
     }
 }
