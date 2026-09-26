@@ -5,7 +5,9 @@ pub mod account_repository;
 use std::collections::VecDeque;
 
 use rustuo_core::ClientVersion;
-use rustuo_protocol::{encode_renaissance_play_server_ack, RenaissanceServerSelection};
+use rustuo_protocol::{
+    encode_renaissance_play_server_ack, RenaissanceGameLogin, RenaissanceServerSelection,
+};
 
 pub const RECONNECT_GRANT_WINDOW_CAPACITY: usize = 128;
 const MAX_AUTH_ID_ISSUANCE_ATTEMPTS: usize = 128;
@@ -161,6 +163,176 @@ pub trait ReconnectCredentialVerifier {
     type Error;
 
     fn verify(&mut self, username: &[u8], password: &[u8]) -> Result<Self::Account, Self::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenaissanceReconnectAdmission<Account> {
+    pub client_version: ClientVersion,
+    pub account: Account,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconnectAdmissionError<E> {
+    UnknownAuthId { auth_id: u32 },
+    VerifierFailed(E),
+}
+
+pub fn admit_renaissance_reconnect<V: ReconnectCredentialVerifier>(
+    login: RenaissanceGameLogin<'_>,
+    grants: &mut ReconnectGrantWindow,
+    verifier: &mut V,
+) -> Result<RenaissanceReconnectAdmission<V::Account>, ReconnectAdmissionError<V::Error>> {
+    let client_version =
+        grants
+            .consume(login.auth_id)
+            .ok_or(ReconnectAdmissionError::UnknownAuthId {
+                auth_id: login.auth_id,
+            })?;
+    let account = verifier
+        .verify(login.username, login.password)
+        .map_err(ReconnectAdmissionError::VerifierFailed)?;
+    Ok(RenaissanceReconnectAdmission {
+        client_version,
+        account,
+    })
+}
+
+#[cfg(test)]
+mod reconnect_admission_tests {
+    use rustuo_core::ClientVersion;
+    use rustuo_protocol::RenaissanceGameLogin;
+
+    use super::{
+        admit_renaissance_reconnect, AuthIdIssuer, ReconnectAdmissionError,
+        ReconnectCredentialVerifier, ReconnectGrantWindow, RenaissanceReconnectAdmission,
+    };
+
+    struct Issuer(u32);
+
+    impl AuthIdIssuer for Issuer {
+        type Error = ();
+
+        fn issue_auth_id(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.0)
+        }
+    }
+
+    struct Verifier {
+        result: Result<u64, &'static str>,
+        calls: usize,
+        received: Option<(*const u8, usize, *const u8, usize)>,
+    }
+
+    impl ReconnectCredentialVerifier for Verifier {
+        type Account = u64;
+        type Error = &'static str;
+
+        fn verify(&mut self, username: &[u8], password: &[u8]) -> Result<u64, Self::Error> {
+            self.calls += 1;
+            self.received = Some((
+                username.as_ptr(),
+                username.len(),
+                password.as_ptr(),
+                password.len(),
+            ));
+            self.result
+        }
+    }
+
+    fn login<'a>(auth_id: u32, username: &'a [u8], password: &'a [u8]) -> RenaissanceGameLogin<'a> {
+        RenaissanceGameLogin {
+            auth_id,
+            username,
+            password,
+        }
+    }
+
+    fn grant(auth_id: u32, version: ClientVersion) -> ReconnectGrantWindow {
+        let mut grants = ReconnectGrantWindow::new();
+        grants.issue(version, &mut Issuer(auth_id)).unwrap();
+        grants
+    }
+
+    fn verifier(result: Result<u64, &'static str>) -> Verifier {
+        Verifier {
+            result,
+            calls: 0,
+            received: None,
+        }
+    }
+
+    #[test]
+    fn known_grant_returns_stored_version_and_account_with_borrowed_credentials() {
+        let version = ClientVersion::new(5, 0, 8, 3);
+        let mut grants = grant(0x1234, version);
+        let username = b"raw\xffname";
+        let password = b"raw\x80pass";
+        let mut verifier = verifier(Ok(42));
+
+        let admitted = admit_renaissance_reconnect(
+            login(0x1234, username, password),
+            &mut grants,
+            &mut verifier,
+        );
+
+        assert_eq!(
+            admitted,
+            Ok(RenaissanceReconnectAdmission {
+                client_version: version,
+                account: 42
+            })
+        );
+        assert_eq!(verifier.calls, 1);
+        assert_eq!(
+            verifier.received,
+            Some((
+                username.as_ptr(),
+                username.len(),
+                password.as_ptr(),
+                password.len()
+            ))
+        );
+        assert_eq!(grants.consume(0x1234), None);
+    }
+
+    #[test]
+    fn unknown_grant_skips_verifier() {
+        let mut grants = ReconnectGrantWindow::new();
+        let mut verifier = verifier(Ok(42));
+
+        assert_eq!(
+            admit_renaissance_reconnect(login(404, b"name", b"pass"), &mut grants, &mut verifier),
+            Err(ReconnectAdmissionError::UnknownAuthId { auth_id: 404 })
+        );
+        assert_eq!(verifier.calls, 0);
+    }
+
+    #[test]
+    fn replayed_grant_skips_verifier_after_success() {
+        let mut grants = grant(7, ClientVersion::new(5, 0, 8, 3));
+        let mut verifier = verifier(Ok(42));
+        admit_renaissance_reconnect(login(7, b"name", b"pass"), &mut grants, &mut verifier)
+            .unwrap();
+
+        assert_eq!(
+            admit_renaissance_reconnect(login(7, b"name", b"pass"), &mut grants, &mut verifier),
+            Err(ReconnectAdmissionError::UnknownAuthId { auth_id: 7 })
+        );
+        assert_eq!(verifier.calls, 1);
+    }
+
+    #[test]
+    fn verifier_error_propagates_and_consumes_grant_permanently() {
+        let mut grants = grant(9, ClientVersion::new(5, 0, 8, 3));
+        let mut verifier = verifier(Err("rejected"));
+
+        assert_eq!(
+            admit_renaissance_reconnect(login(9, b"name", b"bad"), &mut grants, &mut verifier),
+            Err(ReconnectAdmissionError::VerifierFailed("rejected"))
+        );
+        assert_eq!(verifier.calls, 1);
+        assert_eq!(grants.consume(9), None);
+    }
 }
 
 #[cfg(test)]
