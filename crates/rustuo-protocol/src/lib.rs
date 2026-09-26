@@ -9,6 +9,187 @@ pub struct EntityReference {
     pub serial: Serial,
 }
 
+#[cfg(test)]
+mod packet_frame_tests {
+    use super::{decode_packet_frame, PacketFrameError, PacketLayout, PacketLayoutTable};
+
+    #[test]
+    fn fixed_frame_borrows_input_and_preserves_remainder() {
+        let mut layouts = PacketLayoutTable::new();
+        layouts
+            .register(0x21, PacketLayout::Fixed { length: 2 })
+            .unwrap();
+        assert_eq!(layouts.get(0x21), Some(PacketLayout::Fixed { length: 2 }));
+        let input = [0x21, 0xAA, 0xFF];
+        let decoded = decode_packet_frame(&input, &layouts).unwrap().unwrap();
+        assert_eq!(decoded.frame, &input[..2]);
+        assert_eq!(decoded.frame.as_ptr(), input.as_ptr());
+        assert_eq!(decoded.remaining, &input[2..]);
+    }
+
+    #[test]
+    fn variable_frame_reads_big_endian_length_and_preserves_remainder() {
+        let mut layouts = PacketLayoutTable::new();
+        layouts.register(0xBD, PacketLayout::Variable).unwrap();
+        let input = [0xBD, 0x00, 0x05, 0xAA, 0xBB, 0xFF];
+        let decoded = decode_packet_frame(&input, &layouts).unwrap().unwrap();
+        assert_eq!(decoded.frame, &input[..5]);
+        assert_eq!(decoded.remaining, &input[5..]);
+    }
+
+    #[test]
+    fn incomplete_header_and_body_return_none() {
+        let mut layouts = PacketLayoutTable::new();
+        layouts
+            .register(0x21, PacketLayout::Fixed { length: 3 })
+            .unwrap();
+        layouts.register(0xBD, PacketLayout::Variable).unwrap();
+        for input in [
+            &[][..],
+            &[0x21, 0xAA],
+            &[0xBD],
+            &[0xBD, 0x00],
+            &[0xBD, 0x00, 0x05, 0xAA],
+        ] {
+            assert_eq!(decode_packet_frame(input, &layouts), Ok(None));
+        }
+    }
+
+    #[test]
+    fn unknown_packet_id_is_typed_error() {
+        assert_eq!(
+            decode_packet_frame(&[0x77], &PacketLayoutTable::new()),
+            Err(PacketFrameError::UnknownPacketId { packet_id: 0x77 })
+        );
+    }
+
+    #[test]
+    fn variable_lengths_below_header_are_invalid() {
+        let mut layouts = PacketLayoutTable::new();
+        layouts.register(0xBD, PacketLayout::Variable).unwrap();
+        for length in 0..3 {
+            assert_eq!(
+                decode_packet_frame(&[0xBD, 0, length as u8], &layouts),
+                Err(PacketFrameError::InvalidLength {
+                    packet_id: 0xBD,
+                    length
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn zero_fixed_layout_is_rejected_without_registration() {
+        let mut layouts = PacketLayoutTable::new();
+        assert_eq!(
+            layouts.register(0x21, PacketLayout::Fixed { length: 0 }),
+            Err(PacketFrameError::InvalidLayout { packet_id: 0x21 })
+        );
+        assert_eq!(layouts.get(0x21), None);
+    }
+
+    #[test]
+    fn duplicate_packet_id_is_rejected_without_replacement() {
+        let mut layouts = PacketLayoutTable::new();
+        layouts
+            .register(0x21, PacketLayout::Fixed { length: 2 })
+            .unwrap();
+        assert_eq!(
+            layouts.register(0x21, PacketLayout::Variable),
+            Err(PacketFrameError::DuplicatePacketId { packet_id: 0x21 })
+        );
+        assert_eq!(layouts.get(0x21), Some(PacketLayout::Fixed { length: 2 }));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketLayout {
+    Fixed { length: usize },
+    Variable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketFrameError {
+    UnknownPacketId { packet_id: u8 },
+    InvalidLayout { packet_id: u8 },
+    DuplicatePacketId { packet_id: u8 },
+    InvalidLength { packet_id: u8, length: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacketLayoutTable {
+    layouts: [Option<PacketLayout>; 256],
+}
+
+impl Default for PacketLayoutTable {
+    fn default() -> Self {
+        Self {
+            layouts: [None; 256],
+        }
+    }
+}
+
+impl PacketLayoutTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &mut self,
+        packet_id: u8,
+        layout: PacketLayout,
+    ) -> Result<(), PacketFrameError> {
+        if matches!(layout, PacketLayout::Fixed { length: 0 }) {
+            return Err(PacketFrameError::InvalidLayout { packet_id });
+        }
+        if self.get(packet_id).is_some() {
+            return Err(PacketFrameError::DuplicatePacketId { packet_id });
+        }
+        self.layouts[packet_id as usize] = Some(layout);
+        Ok(())
+    }
+
+    pub fn get(&self, packet_id: u8) -> Option<PacketLayout> {
+        self.layouts[packet_id as usize]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketFrame<'a> {
+    pub frame: &'a [u8],
+    pub remaining: &'a [u8],
+}
+
+pub fn decode_packet_frame<'a>(
+    bytes: &'a [u8],
+    layouts: &PacketLayoutTable,
+) -> Result<Option<PacketFrame<'a>>, PacketFrameError> {
+    let Some(&packet_id) = bytes.first() else {
+        return Ok(None);
+    };
+    let layout = layouts
+        .get(packet_id)
+        .ok_or(PacketFrameError::UnknownPacketId { packet_id })?;
+    let frame_length = match layout {
+        PacketLayout::Fixed { length } => length,
+        PacketLayout::Variable => {
+            if bytes.len() < 3 {
+                return Ok(None);
+            }
+            let length = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
+            if length < 3 {
+                return Err(PacketFrameError::InvalidLength { packet_id, length });
+            }
+            length
+        }
+    };
+    if bytes.len() < frame_length {
+        return Ok(None);
+    }
+    let (frame, remaining) = bytes.split_at(frame_length);
+    Ok(Some(PacketFrame { frame, remaining }))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedDecodeError {
     ZeroSeed,
