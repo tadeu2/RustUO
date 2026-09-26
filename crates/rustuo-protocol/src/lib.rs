@@ -225,12 +225,21 @@ pub fn decode_renaissance_server_selection(
     })
 }
 
+pub fn encode_renaissance_play_server_ack(address: u32, port: u16, auth_id: u32) -> Vec<u8> {
+    let mut writer = PacketWriter::new();
+    writer.write_u8(0x8C);
+    writer.write_bytes(&address.to_le_bytes());
+    writer.write_u16(port);
+    writer.write_u32(auth_id);
+    writer.into_inner()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         decode_renaissance_server_selection, encode_renaissance_account_login_ack,
-        AccountLoginAckEncodeError, RenaissanceServerListEntry, RenaissanceServerSelection,
-        ServerSelectionDecodeError,
+        encode_renaissance_play_server_ack, AccountLoginAckEncodeError, RenaissanceServerListEntry,
+        RenaissanceServerSelection, ServerSelectionDecodeError,
     };
 
     #[test]
@@ -483,6 +492,17 @@ mod tests {
         assert_eq!(
             decode_renaissance_server_selection(&[0xA0, 0x00, 0x01, 0xFF]),
             Err(ServerSelectionDecodeError::InvalidLength { length: 4 })
+        );
+    }
+
+    #[test]
+    fn play_server_ack_encoder_writes_exact_eleven_byte_frame() {
+        let frame = encode_renaissance_play_server_ack(0x1122_3344, 0x5566, 0x7788_99AA);
+
+        assert_eq!(frame.len(), 11);
+        assert_eq!(
+            frame,
+            [0x8C, 0x44, 0x33, 0x22, 0x11, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA]
         );
     }
 }
