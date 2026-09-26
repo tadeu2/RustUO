@@ -93,8 +93,212 @@ fn bytes_before_nul(field: &[u8]) -> &[u8] {
     &field[..length]
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PacketWriter {
+    bytes: Vec<u8>,
+}
+
+impl PacketWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn write_u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    pub fn write_i8(&mut self, value: i8) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn write_u16(&mut self, value: u16) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn write_u32(&mut self, value: u32) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+const RENAISSANCE_ACCOUNT_LOGIN_ACK_PACKET_ID: u8 = 0xA8;
+const ACCOUNT_LOGIN_ACK_UNKNOWN: u8 = 0x5D;
+const ACCOUNT_LOGIN_ACK_HEADER_LENGTH: usize = 6;
+const SERVER_LIST_ENTRY_LENGTH: usize = 40;
+const SERVER_LIST_NAME_LENGTH: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountLoginAckEncodeError {
+    CountOverflow { count: usize },
+    LengthOverflow { length: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenaissanceServerListEntry<'a> {
+    pub name: &'a [u8],
+    pub full_percent: u8,
+    pub timezone: i8,
+    pub address: u32,
+}
+
+pub fn encode_renaissance_account_login_ack(
+    entries: &[RenaissanceServerListEntry<'_>],
+) -> Result<Vec<u8>, AccountLoginAckEncodeError> {
+    let count =
+        u16::try_from(entries.len()).map_err(|_| AccountLoginAckEncodeError::CountOverflow {
+            count: entries.len(),
+        })?;
+    let length = entries
+        .len()
+        .checked_mul(SERVER_LIST_ENTRY_LENGTH)
+        .and_then(|entries_length| entries_length.checked_add(ACCOUNT_LOGIN_ACK_HEADER_LENGTH))
+        .ok_or(AccountLoginAckEncodeError::LengthOverflow { length: usize::MAX })?;
+    let encoded_length =
+        u16::try_from(length).map_err(|_| AccountLoginAckEncodeError::LengthOverflow { length })?;
+
+    let mut writer = PacketWriter::new();
+    writer.write_u8(RENAISSANCE_ACCOUNT_LOGIN_ACK_PACKET_ID);
+    writer.write_u16(encoded_length);
+    writer.write_u8(ACCOUNT_LOGIN_ACK_UNKNOWN);
+    writer.write_u16(count);
+
+    let name_padding = [0; SERVER_LIST_NAME_LENGTH];
+    for (index, entry) in (0..count).zip(entries) {
+        writer.write_u16(index);
+
+        let name_length = entry.name.len().min(SERVER_LIST_NAME_LENGTH);
+        writer.write_bytes(&entry.name[..name_length]);
+        writer.write_bytes(&name_padding[..SERVER_LIST_NAME_LENGTH - name_length]);
+
+        writer.write_u8(entry.full_percent);
+        writer.write_i8(entry.timezone);
+        writer.write_u32(entry.address);
+    }
+
+    Ok(writer.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{
+        encode_renaissance_account_login_ack, AccountLoginAckEncodeError,
+        RenaissanceServerListEntry,
+    };
+
+    #[test]
+    fn account_login_ack_encoder_encodes_empty_server_list_header() {
+        assert_eq!(
+            encode_renaissance_account_login_ack(&[]),
+            Ok(vec![0xA8, 0x00, 0x06, 0x5D, 0x00, 0x00])
+        );
+    }
+
+    #[test]
+    fn account_login_ack_encoder_encodes_single_server_entry() {
+        let entry = RenaissanceServerListEntry {
+            name: b"Renaissance",
+            full_percent: 42,
+            timezone: -5,
+            address: 0x1234_5678,
+        };
+
+        let encoded = encode_renaissance_account_login_ack(&[entry]).unwrap();
+
+        assert_eq!(&encoded[..6], &[0xA8, 0x00, 0x2E, 0x5D, 0x00, 0x01]);
+        assert_eq!(&encoded[6..8], &[0x00, 0x00]);
+        assert_eq!(
+            &encoded[8..40],
+            b"Renaissance\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+        );
+        assert_eq!(&encoded[40..42], &[42, 0xFB]);
+        assert_eq!(&encoded[42..46], &[0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn account_login_ack_encoder_preserves_multiple_entry_order_and_indexes() {
+        let entries = [
+            RenaissanceServerListEntry {
+                name: b"First",
+                full_percent: 1,
+                timezone: 2,
+                address: 0x0102_0304,
+            },
+            RenaissanceServerListEntry {
+                name: b"Second",
+                full_percent: 3,
+                timezone: -4,
+                address: 0xA0B0_C0D0,
+            },
+        ];
+
+        let encoded = encode_renaissance_account_login_ack(&entries).unwrap();
+
+        assert_eq!(&encoded[..6], &[0xA8, 0x00, 0x56, 0x5D, 0x00, 0x02]);
+        assert_eq!(&encoded[6..8], &[0x00, 0x00]);
+        assert_eq!(&encoded[46..48], &[0x00, 0x01]);
+        assert_eq!(&encoded[48..54], b"Second");
+        assert_eq!(&encoded[80..82], &[3, 0xFC]);
+        assert_eq!(&encoded[82..86], &[0xA0, 0xB0, 0xC0, 0xD0]);
+    }
+
+    #[test]
+    fn account_login_ack_encoder_truncates_and_pads_raw_names() {
+        let long_name = [0xE9; 40];
+        let entries = [
+            RenaissanceServerListEntry {
+                name: &long_name,
+                full_percent: 0,
+                timezone: 0,
+                address: 0,
+            },
+            RenaissanceServerListEntry {
+                name: &[0xFF, 0x80],
+                full_percent: 0,
+                timezone: 0,
+                address: 0,
+            },
+        ];
+
+        let encoded = encode_renaissance_account_login_ack(&entries).unwrap();
+
+        assert_eq!(&encoded[8..40], &[0xE9; 32]);
+        assert_eq!(&encoded[48..50], &[0xFF, 0x80]);
+        assert_eq!(&encoded[50..80], &[0; 30]);
+    }
+
+    #[test]
+    fn account_login_ack_encoder_rejects_unrepresentable_lengths_and_counts() {
+        let entry = RenaissanceServerListEntry {
+            name: b"",
+            full_percent: 0,
+            timezone: 0,
+            address: 0,
+        };
+        let too_long = vec![entry; (u16::MAX as usize - 6) / 40 + 1];
+
+        assert_eq!(
+            encode_renaissance_account_login_ack(&too_long),
+            Err(AccountLoginAckEncodeError::LengthOverflow {
+                length: 6 + 40 * too_long.len(),
+            })
+        );
+
+        let too_many = vec![entry; u16::MAX as usize + 1];
+        assert_eq!(
+            encode_renaissance_account_login_ack(&too_many),
+            Err(AccountLoginAckEncodeError::CountOverflow {
+                count: too_many.len(),
+            })
+        );
+    }
+
     #[test]
     fn renaissance_seed_decoder_returns_incomplete_without_consuming_input() {
         let input = [0x01, 0x02, 0x03];
