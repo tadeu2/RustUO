@@ -128,6 +128,57 @@ impl PacketWriter {
     }
 }
 
+const RENAISSANCE_GAME_LOGIN_PACKET_ID: u8 = 0x91;
+const GAME_LOGIN_AUTH_ID_LENGTH: usize = 4;
+const GAME_LOGIN_FIELD_LENGTH: usize = 30;
+const GAME_LOGIN_FRAME_LENGTH: usize = 1 + GAME_LOGIN_AUTH_ID_LENGTH + 2 * GAME_LOGIN_FIELD_LENGTH;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameLoginDecodeError {
+    WrongPacketId { packet_id: u8 },
+    Truncated { length: usize },
+    InvalidLength { length: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenaissanceGameLogin<'a> {
+    pub auth_id: u32,
+    pub username: &'a [u8],
+    pub password: &'a [u8],
+}
+
+pub fn decode_renaissance_game_login(
+    bytes: &[u8],
+) -> Result<RenaissanceGameLogin<'_>, GameLoginDecodeError> {
+    let Some(&packet_id) = bytes.first() else {
+        return Err(GameLoginDecodeError::Truncated { length: 0 });
+    };
+    if packet_id != RENAISSANCE_GAME_LOGIN_PACKET_ID {
+        return Err(GameLoginDecodeError::WrongPacketId { packet_id });
+    }
+    if bytes.len() < GAME_LOGIN_FRAME_LENGTH {
+        return Err(GameLoginDecodeError::Truncated {
+            length: bytes.len(),
+        });
+    }
+    if bytes.len() > GAME_LOGIN_FRAME_LENGTH {
+        return Err(GameLoginDecodeError::InvalidLength {
+            length: bytes.len(),
+        });
+    }
+
+    let username_start = 1 + GAME_LOGIN_AUTH_ID_LENGTH;
+    let password_start = username_start + GAME_LOGIN_FIELD_LENGTH;
+    let username_field = &bytes[username_start..password_start];
+    let password_field = &bytes[password_start..GAME_LOGIN_FRAME_LENGTH];
+
+    Ok(RenaissanceGameLogin {
+        auth_id: u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
+        username: bytes_before_nul(username_field),
+        password: bytes_before_nul(password_field),
+    })
+}
+
 const RENAISSANCE_ACCOUNT_LOGIN_ACK_PACKET_ID: u8 = 0xA8;
 const ACCOUNT_LOGIN_ACK_UNKNOWN: u8 = 0x5D;
 const ACCOUNT_LOGIN_ACK_HEADER_LENGTH: usize = 6;
@@ -237,8 +288,9 @@ pub fn encode_renaissance_play_server_ack(address: u32, port: u16, auth_id: u32)
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_renaissance_server_selection, encode_renaissance_account_login_ack,
-        encode_renaissance_play_server_ack, AccountLoginAckEncodeError, RenaissanceServerListEntry,
+        decode_renaissance_game_login, decode_renaissance_server_selection,
+        encode_renaissance_account_login_ack, encode_renaissance_play_server_ack,
+        AccountLoginAckEncodeError, GameLoginDecodeError, RenaissanceServerListEntry,
         RenaissanceServerSelection, ServerSelectionDecodeError,
     };
 
@@ -503,6 +555,71 @@ mod tests {
         assert_eq!(
             frame,
             [0x8C, 0x44, 0x33, 0x22, 0x11, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA]
+        );
+    }
+
+    #[test]
+    fn game_login_decoder_reads_auth_id_and_raw_fields_from_exact_offsets() {
+        let mut frame = [0xCC; 65];
+        frame[0] = 0x91;
+        frame[1..5].copy_from_slice(&[0x80, 0x12, 0x34, 0x56]);
+        frame[5..35].fill(0x81);
+        frame[35..65].fill(0xFE);
+
+        let decoded = decode_renaissance_game_login(&frame).unwrap();
+
+        assert_eq!(decoded.auth_id, 0x8012_3456);
+        assert_eq!(decoded.username, &[0x81; 30]);
+        assert_eq!(decoded.password, &[0xFE; 30]);
+        assert_eq!(decoded.username.as_ptr(), frame[5..].as_ptr());
+        assert_eq!(decoded.password.as_ptr(), frame[35..].as_ptr());
+    }
+
+    #[test]
+    fn game_login_decoder_preserves_zero_auth_id_and_truncates_each_field_at_nul() {
+        let mut frame = [0; 65];
+        frame[0] = 0x91;
+        frame[5..35].fill(0x66);
+        frame[5..8].copy_from_slice(&[0x55, 0xFF, 0]);
+        frame[35..65].fill(0xFE);
+        frame[35..37].copy_from_slice(&[0x80, 0]);
+
+        let decoded = decode_renaissance_game_login(&frame).unwrap();
+
+        assert_eq!(decoded.auth_id, 0);
+        assert_eq!(decoded.username, &[0x55, 0xFF]);
+        assert_eq!(decoded.password, &[0x80]);
+    }
+
+    #[test]
+    fn game_login_decoder_accepts_empty_fields_and_reports_every_short_length() {
+        let mut frame = [0; 65];
+        frame[0] = 0x91;
+        let decoded = decode_renaissance_game_login(&frame).unwrap();
+        assert_eq!(decoded.username, b"");
+        assert_eq!(decoded.password, b"");
+
+        for length in 0..65 {
+            let error = decode_renaissance_game_login(&frame[..length]).unwrap_err();
+            assert_eq!(error, GameLoginDecodeError::Truncated { length });
+        }
+    }
+
+    #[test]
+    fn game_login_decoder_rejects_wrong_packet_id_and_oversized_frame() {
+        let mut frame = [0; 65];
+        frame[0] = 0x90;
+        assert_eq!(
+            decode_renaissance_game_login(&frame),
+            Err(GameLoginDecodeError::WrongPacketId { packet_id: 0x90 })
+        );
+
+        frame[0] = 0x91;
+        let mut oversized = [0; 66];
+        oversized[..65].copy_from_slice(&frame);
+        assert_eq!(
+            decode_renaissance_game_login(&oversized),
+            Err(GameLoginDecodeError::InvalidLength { length: 66 })
         );
     }
 }
