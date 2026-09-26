@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account_repository;
+pub mod renaissance_login_flow;
 
 use std::collections::VecDeque;
 
