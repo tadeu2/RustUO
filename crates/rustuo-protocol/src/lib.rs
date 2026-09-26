@@ -185,11 +185,52 @@ pub fn encode_renaissance_account_login_ack(
     Ok(writer.into_inner())
 }
 
+const RENAISSANCE_SERVER_SELECTION_PACKET_ID: u8 = 0xA0;
+const SERVER_SELECTION_FRAME_LENGTH: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerSelectionDecodeError {
+    WrongPacketId { packet_id: u8 },
+    Truncated { length: usize },
+    InvalidLength { length: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenaissanceServerSelection {
+    pub index: i16,
+}
+
+pub fn decode_renaissance_server_selection(
+    bytes: &[u8],
+) -> Result<RenaissanceServerSelection, ServerSelectionDecodeError> {
+    let Some(&packet_id) = bytes.first() else {
+        return Err(ServerSelectionDecodeError::Truncated { length: 0 });
+    };
+    if packet_id != RENAISSANCE_SERVER_SELECTION_PACKET_ID {
+        return Err(ServerSelectionDecodeError::WrongPacketId { packet_id });
+    }
+    if bytes.len() < SERVER_SELECTION_FRAME_LENGTH {
+        return Err(ServerSelectionDecodeError::Truncated {
+            length: bytes.len(),
+        });
+    }
+    if bytes.len() > SERVER_SELECTION_FRAME_LENGTH {
+        return Err(ServerSelectionDecodeError::InvalidLength {
+            length: bytes.len(),
+        });
+    }
+
+    Ok(RenaissanceServerSelection {
+        index: i16::from_be_bytes([bytes[1], bytes[2]]),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_renaissance_account_login_ack, AccountLoginAckEncodeError,
-        RenaissanceServerListEntry,
+        decode_renaissance_server_selection, encode_renaissance_account_login_ack,
+        AccountLoginAckEncodeError, RenaissanceServerListEntry, RenaissanceServerSelection,
+        ServerSelectionDecodeError,
     };
 
     #[test]
@@ -407,5 +448,41 @@ mod tests {
         assert!(decode_renaissance_account_login(&frame).is_ok());
         frame[61] = 0xFF;
         assert!(decode_renaissance_account_login(&frame).is_ok());
+    }
+
+    #[test]
+    fn server_selection_decoder_preserves_signed_big_endian_indexes() {
+        assert_eq!(
+            decode_renaissance_server_selection(&[0xA0, 0x12, 0x34]),
+            Ok(RenaissanceServerSelection { index: 0x1234 })
+        );
+        assert_eq!(
+            decode_renaissance_server_selection(&[0xA0, 0xFF, 0xFE]),
+            Ok(RenaissanceServerSelection { index: -2 })
+        );
+    }
+
+    #[test]
+    fn server_selection_decoder_rejects_wrong_packet_id() {
+        assert_eq!(
+            decode_renaissance_server_selection(&[0xA1, 0x00, 0x01]),
+            Err(ServerSelectionDecodeError::WrongPacketId { packet_id: 0xA1 })
+        );
+    }
+
+    #[test]
+    fn server_selection_decoder_reports_truncated_and_extra_bytes() {
+        assert_eq!(
+            decode_renaissance_server_selection(&[]),
+            Err(ServerSelectionDecodeError::Truncated { length: 0 })
+        );
+        assert_eq!(
+            decode_renaissance_server_selection(&[0xA0, 0x01]),
+            Err(ServerSelectionDecodeError::Truncated { length: 2 })
+        );
+        assert_eq!(
+            decode_renaissance_server_selection(&[0xA0, 0x00, 0x01, 0xFF]),
+            Err(ServerSelectionDecodeError::InvalidLength { length: 4 })
+        );
     }
 }
