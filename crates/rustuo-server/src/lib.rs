@@ -165,6 +165,77 @@ pub trait ReconnectCredentialVerifier {
     fn verify(&mut self, username: &[u8], password: &[u8]) -> Result<Self::Account, Self::Error>;
 }
 
+/// Application-owned identity returned after successful credential verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AccountId(u64);
+
+impl AccountId {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// Owned raw-byte credential record for tests and local development only.
+///
+/// Passwords are not hashed; do not use this fixture for production authentication.
+pub struct InMemoryAccountRecord {
+    account_id: AccountId,
+    username: Vec<u8>,
+    password: Vec<u8>,
+}
+
+impl InMemoryAccountRecord {
+    pub fn new(account_id: AccountId, username: &[u8], password: &[u8]) -> Self {
+        Self {
+            account_id,
+            username: username.to_vec(),
+            password: password.to_vec(),
+        }
+    }
+}
+
+/// Deterministic exact-byte verifier for tests and local development only.
+///
+/// It stores raw passwords without hashing and is not production authentication.
+pub struct InMemoryAccountVerifier {
+    accounts: Vec<InMemoryAccountRecord>,
+}
+
+impl InMemoryAccountVerifier {
+    pub fn new(accounts: impl IntoIterator<Item = InMemoryAccountRecord>) -> Self {
+        Self {
+            accounts: accounts.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InMemoryAccountVerifierError {
+    UnknownUsername,
+    PasswordMismatch,
+}
+
+impl ReconnectCredentialVerifier for InMemoryAccountVerifier {
+    type Account = AccountId;
+    type Error = InMemoryAccountVerifierError;
+
+    fn verify(&mut self, username: &[u8], password: &[u8]) -> Result<AccountId, Self::Error> {
+        let account = self
+            .accounts
+            .iter()
+            .find(|account| account.username == username)
+            .ok_or(InMemoryAccountVerifierError::UnknownUsername)?;
+        if account.password != password {
+            return Err(InMemoryAccountVerifierError::PasswordMismatch);
+        }
+        Ok(account.account_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenaissanceReconnectAdmission<Account> {
     pub client_version: ClientVersion,
@@ -685,5 +756,119 @@ mod reconnect_grant_window_tests {
         );
         assert_eq!(session.phase(), RenaissanceSessionPhase::Authenticated);
         assert_eq!(grants.consume(7), Some(version()));
+    }
+}
+
+#[cfg(test)]
+mod in_memory_account_tests {
+    use rustuo_core::ClientVersion;
+    use rustuo_protocol::RenaissanceGameLogin;
+
+    use super::{
+        admit_renaissance_reconnect, AccountId, AuthIdIssuer, InMemoryAccountRecord,
+        InMemoryAccountVerifier, InMemoryAccountVerifierError, ReconnectAdmissionError,
+        ReconnectCredentialVerifier, ReconnectGrantWindow, RenaissanceReconnectAdmission,
+    };
+
+    struct FixedIssuer(u32);
+
+    impl AuthIdIssuer for FixedIssuer {
+        type Error = ();
+
+        fn issue_auth_id(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.0)
+        }
+    }
+
+    fn verifier(records: &[(u64, &[u8], &[u8])]) -> InMemoryAccountVerifier {
+        InMemoryAccountVerifier::new(
+            records.iter().map(|(id, user, pass)| {
+                InMemoryAccountRecord::new(AccountId::new(*id), user, pass)
+            }),
+        )
+    }
+
+    fn login<'a>(auth_id: u32, username: &'a [u8], password: &'a [u8]) -> RenaissanceGameLogin<'a> {
+        RenaissanceGameLogin {
+            auth_id,
+            username,
+            password,
+        }
+    }
+
+    #[test]
+    fn verifies_one_record_and_returns_application_owned_identity() {
+        let mut fixture = verifier(&[(7, b"Alice", b"secret")]);
+        let id = fixture.verify(b"Alice", b"secret").unwrap();
+        assert_eq!(id, AccountId::new(7));
+        assert_eq!(id.value(), 7);
+    }
+
+    #[test]
+    fn selects_exact_record_among_multiple_accounts() {
+        let mut fixture = verifier(&[(7, b"Alice", b"one"), (8, b"Bob", b"two")]);
+        assert_eq!(fixture.verify(b"Bob", b"two"), Ok(AccountId::new(8)));
+        assert_eq!(fixture.verify(b"Alice", b"one"), Ok(AccountId::new(7)));
+        assert_eq!(
+            fixture.verify(b"alice", b"one"),
+            Err(InMemoryAccountVerifierError::UnknownUsername)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_username_and_wrong_password_without_exposing_credentials() {
+        let mut fixture = verifier(&[(7, b"Alice", b"secret")]);
+        assert_eq!(
+            fixture.verify(b"other", b"secret"),
+            Err(InMemoryAccountVerifierError::UnknownUsername)
+        );
+        let error = fixture.verify(b"Alice", b"wrong").unwrap_err();
+        assert_eq!(error, InMemoryAccountVerifierError::PasswordMismatch);
+        let diagnostic = format!("{error:?}");
+        assert!(!diagnostic.contains("secret"));
+        assert!(!diagnostic.contains("wrong"));
+    }
+
+    #[test]
+    fn compares_raw_non_utf8_bytes_without_text_conversion() {
+        let mut fixture = verifier(&[(9, b"A\xff", b"p\x80")]);
+        assert_eq!(fixture.verify(b"A\xff", b"p\x80"), Ok(AccountId::new(9)));
+        assert_eq!(
+            fixture.verify(b"A\xfe", b"p\x80"),
+            Err(InMemoryAccountVerifierError::UnknownUsername)
+        );
+        assert_eq!(
+            fixture.verify(b"A\xff", b"p\x81"),
+            Err(InMemoryAccountVerifierError::PasswordMismatch)
+        );
+    }
+
+    #[test]
+    fn fixture_admission_returns_grant_version_and_consumes_on_rejection() {
+        let version = ClientVersion::new(5, 0, 8, 3);
+        let mut grants = ReconnectGrantWindow::new();
+        grants.issue(version, &mut FixedIssuer(11)).unwrap();
+        let mut fixture = verifier(&[(7, b"Alice", b"secret")]);
+        assert_eq!(
+            admit_renaissance_reconnect(login(11, b"Alice", b"secret"), &mut grants, &mut fixture),
+            Ok(RenaissanceReconnectAdmission {
+                client_version: version,
+                account: AccountId::new(7)
+            })
+        );
+        assert_eq!(grants.consume(11), None);
+
+        grants.issue(version, &mut FixedIssuer(12)).unwrap();
+        assert_eq!(
+            admit_renaissance_reconnect(login(12, b"Alice", b"wrong"), &mut grants, &mut fixture),
+            Err(ReconnectAdmissionError::VerifierFailed(
+                InMemoryAccountVerifierError::PasswordMismatch
+            ))
+        );
+        assert_eq!(grants.consume(12), None);
+        assert_eq!(
+            admit_renaissance_reconnect(login(12, b"Alice", b"secret"), &mut grants, &mut fixture),
+            Err(ReconnectAdmissionError::UnknownAuthId { auth_id: 12 })
+        );
     }
 }
