@@ -207,6 +207,40 @@ mod packet_frame_tests {
 }
 
 #[cfg(test)]
+mod renaissance_5083_login_layout_tests {
+    use super::{decode_packet_frame, renaissance_5083_login_layouts, PacketFrameError};
+
+    #[test]
+    fn login_profile_decodes_exact_fixed_frames() {
+        let layouts = renaissance_5083_login_layouts().unwrap();
+        for (packet_id, length) in [(0x80, 62), (0xA0, 3), (0x91, 65)] {
+            let mut input = vec![0; length + 1];
+            input[0] = packet_id;
+            input[length] = 0xFF;
+
+            let decoded = decode_packet_frame(&input, &layouts).unwrap().unwrap();
+            assert_eq!(decoded.frame, &input[..length]);
+            assert_eq!(decoded.remaining, &[0xFF]);
+            assert_eq!(
+                decode_packet_frame(&input[..length - 1], &layouts),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn login_profile_rejects_out_of_scope_ids() {
+        let layouts = renaissance_5083_login_layouts().unwrap();
+        for packet_id in [0x5D, 0xEF, 0x02, 0x22, 0x73, 0xBD] {
+            assert_eq!(
+                decode_packet_frame(&[packet_id], &layouts),
+                Err(PacketFrameError::UnknownPacketId { packet_id })
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod packet_frames_tests {
     use super::{decode_packet_frames, PacketFrameError, PacketLayout, PacketLayoutTable};
 
@@ -329,6 +363,16 @@ impl PacketLayoutTable {
     pub fn get(&self, packet_id: u8) -> Option<PacketLayout> {
         self.layouts[packet_id as usize]
     }
+}
+
+/// Fixed client login packets registered by ServUO for the Renaissance 5.0.8.3 path.
+/// The four-byte connection seed is decoded separately, before packet framing.
+pub fn renaissance_5083_login_layouts() -> Result<PacketLayoutTable, PacketFrameError> {
+    let mut layouts = PacketLayoutTable::new();
+    for (packet_id, length) in [(0x80, 62), (0xA0, 3), (0x91, 65)] {
+        layouts.register(packet_id, PacketLayout::Fixed { length })?;
+    }
+    Ok(layouts)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
