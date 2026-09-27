@@ -2,8 +2,9 @@
 
 use rustuo_core::ClientVersion;
 use rustuo_protocol::{
-    decode_renaissance_play_character_slot, encode_renaissance_login_confirm,
-    encode_renaissance_old_character_list, OldCharacterListEncodeError,
+    compress_legacy_packet, decode_renaissance_play_character_slot,
+    encode_renaissance_login_confirm, encode_renaissance_old_character_list,
+    encode_renaissance_supported_features, OldCharacterListEncodeError,
     PlayCharacterSlotDecodeError,
 };
 use rustuo_world::World;
@@ -38,18 +39,21 @@ pub struct RenaissanceWorldEntrySession {
     admission: RenaissanceReconnectAdmission<LegacyAccountIdentity>,
     world: World,
     avatar: AvatarPresentation,
+    feature_flags: u16,
     phase: Phase,
 }
 
 impl RenaissanceWorldEntrySession {
     pub fn new(
         admission: RenaissanceReconnectAdmission<LegacyAccountIdentity>,
+        feature_flags: u16,
         avatar: AvatarPresentation,
     ) -> Self {
         Self {
             admission,
             world: World::renaissance_client_fixture(),
             avatar,
+            feature_flags,
             phase: Phase::AwaitingList,
         }
     }
@@ -62,14 +66,18 @@ impl RenaissanceWorldEntrySession {
         self.admission.client_version
     }
 
-    pub fn character_list(&mut self) -> Result<Vec<u8>, WorldEntryError> {
+    pub fn reconnect_packets(&mut self) -> Result<[Vec<u8>; 2], WorldEntryError> {
         if self.phase != Phase::AwaitingList {
             return Err(WorldEntryError::InvalidPhase);
         }
         let frame = encode_renaissance_old_character_list(&self.avatar.name)
             .map_err(WorldEntryError::CharacterList)?;
+        let features = encode_renaissance_supported_features(self.feature_flags);
         self.phase = Phase::AwaitingSlot;
-        Ok(frame)
+        Ok([
+            compress_legacy_packet(&features),
+            compress_legacy_packet(&frame),
+        ])
     }
 
     pub fn play_character(&mut self, frame: &[u8]) -> Result<Vec<u8>, WorldEntryError> {
@@ -96,6 +104,6 @@ impl RenaissanceWorldEntrySession {
             u16::try_from(height).expect("seeded map height fits wire"),
         );
         self.phase = Phase::Confirmed;
-        Ok(confirmation)
+        Ok(compress_legacy_packet(&confirmation))
     }
 }
