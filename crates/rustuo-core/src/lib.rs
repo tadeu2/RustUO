@@ -12,7 +12,128 @@ pub struct Serial(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CoreError {
+    SentinelSerial { raw: u32 },
+    InvalidEntityId { raw: u32 },
+    UnknownDirectionBits { raw: u8 },
     MalformedClientVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntityId(u32);
+
+impl EntityId {
+    pub const fn new(raw: u32) -> Result<Self, CoreError> {
+        if raw == 0 || raw == u32::MAX {
+            Err(CoreError::SentinelSerial { raw })
+        } else if raw <= 0x7fff_ffff {
+            Ok(Self(raw))
+        } else {
+            Err(CoreError::InvalidEntityId { raw })
+        }
+    }
+
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Point3 {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl Point3 {
+    pub const fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MapId(u8);
+
+impl MapId {
+    pub const fn new(raw: u8) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Direction {
+    North = 0,
+    Right = 1,
+    East = 2,
+    Down = 3,
+    South = 4,
+    Left = 5,
+    West = 6,
+    Up = 7,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DecodedDirection {
+    base: Direction,
+    running: bool,
+}
+
+impl Direction {
+    pub const fn from_raw(raw: u8) -> Result<DecodedDirection, CoreError> {
+        if raw & !0x87 != 0 {
+            return Err(CoreError::UnknownDirectionBits { raw });
+        }
+
+        let base = match raw & 0x07 {
+            0 => Self::North,
+            1 => Self::Right,
+            2 => Self::East,
+            3 => Self::Down,
+            4 => Self::South,
+            5 => Self::Left,
+            6 => Self::West,
+            _ => Self::Up,
+        };
+        Ok(DecodedDirection {
+            base,
+            running: raw & 0x80 != 0,
+        })
+    }
+
+    pub const fn offset(self) -> (i32, i32) {
+        match self {
+            Self::North => (0, -1),
+            Self::Right => (1, -1),
+            Self::East => (1, 0),
+            Self::Down => (1, 1),
+            Self::South => (0, 1),
+            Self::Left => (-1, 1),
+            Self::West => (-1, 0),
+            Self::Up => (-1, -1),
+        }
+    }
+}
+
+impl DecodedDirection {
+    pub const fn base(self) -> Direction {
+        self.base
+    }
+
+    pub const fn is_running(self) -> bool {
+        self.running
+    }
+
+    pub const fn to_raw(self) -> u8 {
+        self.base as u8 | if self.running { 0x80 } else { 0 }
+    }
+
+    pub const fn offset(self) -> (i32, i32) {
+        self.base.offset()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -71,7 +192,7 @@ impl fmt::Display for ClientVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientVersion, CoreError};
+    use super::{ClientVersion, CoreError, Direction, EntityId, MapId, Point3};
     use std::str::FromStr;
 
     #[test]
@@ -95,6 +216,80 @@ mod tests {
             assert_eq!(
                 ClientVersion::from_str(text),
                 Err(CoreError::MalformedClientVersion)
+            );
+        }
+    }
+
+    #[test]
+    fn entity_id_accepts_only_allocatable_serials_and_preserves_raw_value() {
+        for raw in [1, 0x3fff_ffff, 0x4000_0000, 0x7fff_ffff] {
+            assert_eq!(EntityId::new(raw).unwrap().raw(), raw);
+        }
+        assert_eq!(EntityId::new(0), Err(CoreError::SentinelSerial { raw: 0 }));
+        assert_eq!(
+            EntityId::new(u32::MAX),
+            Err(CoreError::SentinelSerial { raw: u32::MAX })
+        );
+        assert_eq!(
+            EntityId::new(0x8000_0000),
+            Err(CoreError::InvalidEntityId { raw: 0x8000_0000 })
+        );
+    }
+
+    #[test]
+    fn point_and_map_values_round_trip_their_boundaries() {
+        assert_eq!(Point3::new(i32::MIN, -1, i32::MAX).x, i32::MIN);
+        assert_eq!(Point3::new(i32::MIN, -1, i32::MAX).y, -1);
+        assert_eq!(Point3::new(i32::MIN, -1, i32::MAX).z, i32::MAX);
+        for raw in [0, 1, u8::MAX] {
+            assert_eq!(MapId::new(raw).raw(), raw);
+        }
+    }
+
+    #[test]
+    fn movement_direction_bytes_round_trip_and_reject_reserved_bits() {
+        for (raw, expected) in [
+            (0, Direction::North),
+            (1, Direction::Right),
+            (2, Direction::East),
+            (3, Direction::Down),
+            (4, Direction::South),
+            (5, Direction::Left),
+            (6, Direction::West),
+            (7, Direction::Up),
+        ] {
+            for running in [false, true] {
+                let wire = raw | if running { 0x80 } else { 0 };
+                let decoded = Direction::from_raw(wire).unwrap();
+                assert_eq!(decoded.base(), expected);
+                assert_eq!(decoded.is_running(), running);
+                assert_eq!(decoded.to_raw(), wire);
+            }
+        }
+        for raw in [0x08, 0x40, 0x78, 0x88, 0xff] {
+            assert_eq!(
+                Direction::from_raw(raw),
+                Err(CoreError::UnknownDirectionBits { raw })
+            );
+        }
+    }
+
+    #[test]
+    fn all_eight_directions_expose_distinct_one_step_offsets() {
+        for (direction, offset) in [
+            (Direction::North, (0, -1)),
+            (Direction::Right, (1, -1)),
+            (Direction::East, (1, 0)),
+            (Direction::Down, (1, 1)),
+            (Direction::South, (0, 1)),
+            (Direction::Left, (-1, 1)),
+            (Direction::West, (-1, 0)),
+            (Direction::Up, (-1, -1)),
+        ] {
+            assert_eq!(direction.offset(), offset);
+            assert_eq!(
+                Direction::from_raw(direction as u8).unwrap().offset(),
+                offset
             );
         }
     }
