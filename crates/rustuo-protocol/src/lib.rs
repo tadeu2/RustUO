@@ -10,6 +10,110 @@ pub struct EntityReference {
 }
 
 #[cfg(test)]
+mod packet_input_buffer_tests {
+    use super::{PacketFrameError, PacketInputBuffer, PacketLayout, PacketLayoutTable};
+
+    fn layouts() -> PacketLayoutTable {
+        let mut layouts = PacketLayoutTable::new();
+        layouts
+            .register(0x21, PacketLayout::Fixed { length: 2 })
+            .unwrap();
+        layouts.register(0xBD, PacketLayout::Variable).unwrap();
+        layouts
+    }
+
+    #[test]
+    fn split_fixed_frame_is_emitted_only_when_complete() {
+        let mut input = PacketInputBuffer::new();
+        let layouts = layouts();
+        assert_eq!(input.append(&[0x21], &layouts), Ok(vec![]));
+        assert_eq!(input.pending_len(), 1);
+        assert_eq!(input.append(&[0xAA], &layouts), Ok(vec![vec![0x21, 0xAA]]));
+        assert_eq!(input.pending_len(), 0);
+    }
+
+    #[test]
+    fn split_variable_header_and_body_are_retained_exactly() {
+        let mut input = PacketInputBuffer::new();
+        let layouts = layouts();
+        for (chunk, pending_len) in [(&[0xBD][..], 1), (&[0, 5][..], 3), (&[0xAA][..], 4)] {
+            assert_eq!(input.append(chunk, &layouts), Ok(vec![]));
+            assert_eq!(input.pending_len(), pending_len);
+        }
+        assert_eq!(
+            input.append(&[0xBB], &layouts),
+            Ok(vec![vec![0xBD, 0, 5, 0xAA, 0xBB]])
+        );
+        assert_eq!(input.pending_len(), 0);
+    }
+
+    #[test]
+    fn multiple_owned_frames_leave_exact_partial_suffix_for_next_append() {
+        let mut input = PacketInputBuffer::new();
+        let layouts = layouts();
+        assert_eq!(
+            input.append(&[0x21, 0xAA, 0xBD, 0, 3, 0x21], &layouts),
+            Ok(vec![vec![0x21, 0xAA], vec![0xBD, 0, 3]])
+        );
+        assert_eq!(input.pending_len(), 1);
+        assert_eq!(input.append(&[0xBB], &layouts), Ok(vec![vec![0x21, 0xBB]]));
+        assert_eq!(input.pending_len(), 0);
+    }
+
+    #[test]
+    fn empty_chunks_do_not_change_pending_or_return_frames() {
+        let mut input = PacketInputBuffer::new();
+        let layouts = layouts();
+        assert_eq!(input.append(&[], &layouts), Ok(vec![]));
+        assert_eq!(input.append(&[0x21], &layouts), Ok(vec![]));
+        assert_eq!(input.append(&[], &layouts), Ok(vec![]));
+        assert_eq!(input.pending_len(), 1);
+        assert_eq!(input.append(&[0xAA], &layouts), Ok(vec![vec![0x21, 0xAA]]));
+    }
+
+    #[test]
+    fn returned_frame_owns_bytes_after_future_appends() {
+        let mut input = PacketInputBuffer::new();
+        let layouts = layouts();
+        let first = input.append(&[0x21, 0xAA], &layouts).unwrap();
+        assert_eq!(
+            input.append(&[0x21, 0xBB], &layouts),
+            Ok(vec![vec![0x21, 0xBB]])
+        );
+        assert_eq!(first, vec![vec![0x21, 0xAA]]);
+    }
+
+    #[test]
+    fn unknown_packet_after_complete_prefix_rolls_back_pending_and_frames() {
+        let mut input = PacketInputBuffer::new();
+        let layouts = layouts();
+        assert_eq!(input.append(&[0x21], &layouts), Ok(vec![]));
+        assert_eq!(
+            input.append(&[0xAA, 0x77], &layouts),
+            Err(PacketFrameError::UnknownPacketId { packet_id: 0x77 })
+        );
+        assert_eq!(input.pending_len(), 1);
+        assert_eq!(input.append(&[0xBB], &layouts), Ok(vec![vec![0x21, 0xBB]]));
+    }
+
+    #[test]
+    fn invalid_variable_length_after_complete_prefix_rolls_back_pending_and_frames() {
+        let mut input = PacketInputBuffer::new();
+        let layouts = layouts();
+        assert_eq!(input.append(&[0x21], &layouts), Ok(vec![]));
+        assert_eq!(
+            input.append(&[0xAA, 0xBD, 0, 2], &layouts),
+            Err(PacketFrameError::InvalidLength {
+                packet_id: 0xBD,
+                length: 2,
+            })
+        );
+        assert_eq!(input.pending_len(), 1);
+        assert_eq!(input.append(&[0xBB], &layouts), Ok(vec![vec![0x21, 0xBB]]));
+    }
+}
+
+#[cfg(test)]
 mod packet_frame_tests {
     use super::{decode_packet_frame, PacketFrameError, PacketLayout, PacketLayoutTable};
 
@@ -237,6 +341,36 @@ pub struct PacketFrame<'a> {
 pub struct PacketFrames<'a> {
     pub frames: Vec<&'a [u8]>,
     pub remaining: &'a [u8],
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PacketInputBuffer {
+    pending: Vec<u8>,
+}
+
+impl PacketInputBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn append(
+        &mut self,
+        bytes: &[u8],
+        layouts: &PacketLayoutTable,
+    ) -> Result<Vec<Vec<u8>>, PacketFrameError> {
+        let mut combined = Vec::with_capacity(self.pending.len() + bytes.len());
+        combined.extend_from_slice(&self.pending);
+        combined.extend_from_slice(bytes);
+
+        let decoded = decode_packet_frames(&combined, layouts)?;
+        let frames = decoded.frames.into_iter().map(<[u8]>::to_vec).collect();
+        self.pending = decoded.remaining.to_vec();
+        Ok(frames)
+    }
 }
 
 pub fn decode_packet_frame<'a>(
