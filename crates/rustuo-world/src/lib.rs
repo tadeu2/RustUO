@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use rustuo_core::{EntityId, MapId, Point3};
+use rustuo_core::{DecodedDirection, EntityId, MapId, Point3};
 
 const FIXTURE_MAP: MapId = MapId::new(0xfe);
 const FIXTURE_SIZE: i32 = 16;
@@ -14,6 +14,7 @@ pub struct Entity {
     id: EntityId,
     map: MapId,
     position: Point3,
+    generation: u64,
 }
 
 impl Entity {
@@ -35,6 +36,22 @@ pub enum WorldError {
     NotFound(EntityId),
     Duplicate(EntityId),
     OutOfBounds { entity: EntityId, target: Point3 },
+    StaleDecision(EntityId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveState {
+    Accepted,
+    RejectedOutOfBounds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveDecision {
+    entity: EntityId,
+    source: Point3,
+    source_generation: u64,
+    target: Point3,
+    state: MoveState,
 }
 
 #[derive(Debug)]
@@ -104,6 +121,7 @@ impl World {
                 id,
                 map: FIXTURE_MAP,
                 position,
+                generation: 0,
             },
         );
         Ok(())
@@ -112,15 +130,60 @@ impl World {
     pub fn entity_count(&self) -> usize {
         self.entities.len()
     }
+
+    pub fn decide_move(
+        &self,
+        id: EntityId,
+        direction: DecodedDirection,
+    ) -> Result<MoveDecision, WorldError> {
+        let entity = self.lookup(id)?;
+        let (dx, dy) = direction.offset();
+        let source = entity.position;
+        let target = Point3::new(source.x + dx, source.y + dy, source.z);
+        Ok(MoveDecision {
+            entity: id,
+            source,
+            source_generation: entity.generation,
+            target,
+            state: if self.in_bounds(target) {
+                MoveState::Accepted
+            } else {
+                MoveState::RejectedOutOfBounds
+            },
+        })
+    }
+
+    pub fn apply_move(&mut self, decision: MoveDecision) -> Result<(), WorldError> {
+        let entity = self
+            .entities
+            .get_mut(&decision.entity)
+            .ok_or(WorldError::NotFound(decision.entity))?;
+        if entity.position != decision.source || entity.generation != decision.source_generation {
+            return Err(WorldError::StaleDecision(decision.entity));
+        }
+        if decision.state == MoveState::RejectedOutOfBounds {
+            return Err(WorldError::OutOfBounds {
+                entity: decision.entity,
+                target: decision.target,
+            });
+        }
+        entity.position = decision.target;
+        entity.generation += 1;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{World, WorldError};
-    use rustuo_core::{EntityId, MapId, Point3};
+    use super::{MoveState, World, WorldError};
+    use rustuo_core::{Direction, EntityId, MapId, Point3};
 
     fn id(raw: u32) -> EntityId {
         EntityId::new(raw).unwrap()
+    }
+
+    fn direction(raw: u8) -> rustuo_core::DecodedDirection {
+        Direction::from_raw(raw).unwrap()
     }
 
     #[test]
@@ -221,5 +284,129 @@ mod tests {
         assert_eq!(world.player().id(), id(1));
         assert_eq!(world.player().position(), Point3::new(8, 8, 0));
         assert_eq!(world.entity_count(), 2);
+    }
+
+    #[test]
+    fn decisions_are_pure_and_all_eight_offsets_preserve_z_and_ownership() {
+        for raw in 0..8 {
+            for running in [false, true] {
+                let mut world = World::new();
+                let before = *world.player();
+                let decoded = direction(raw | if running { 0x80 } else { 0 });
+                let (dx, dy) = decoded.offset();
+                let decision = world.decide_move(id(1), decoded).unwrap();
+                assert_eq!(decision.entity, id(1));
+                assert_eq!(decision.source, before.position());
+                assert_eq!(decision.source_generation, 0);
+                assert_eq!(decision.target, Point3::new(8 + dx, 8 + dy, 0));
+                assert_eq!(decision.state, MoveState::Accepted);
+                assert_eq!(*world.player(), before);
+
+                world.apply_move(decision).unwrap();
+                assert_eq!(world.player().position(), decision.target);
+                assert_eq!(world.player().map(), before.map());
+                assert_eq!(world.entity_count(), 1);
+                assert_eq!(world.lookup(id(1)).unwrap(), world.player());
+                assert_eq!(
+                    world.decide_move(id(1), decoded).unwrap().source_generation,
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn corner_diagonals_are_accepted_without_side_tile_policy() {
+        for (start, raw, target) in [
+            (Point3::new(0, 0, 7), 3, Point3::new(1, 1, 7)),
+            (Point3::new(15, 0, 7), 5, Point3::new(14, 1, 7)),
+            (Point3::new(15, 15, 7), 7, Point3::new(14, 14, 7)),
+            (Point3::new(0, 15, 7), 1, Point3::new(1, 14, 7)),
+        ] {
+            let mut world = World::new();
+            world.insert_entity(id(2), start).unwrap();
+            let decision = world.decide_move(id(2), direction(raw)).unwrap();
+            assert_eq!(decision.state, MoveState::Accepted);
+            world.apply_move(decision).unwrap();
+            assert_eq!(world.lookup(id(2)).unwrap().position(), target);
+            assert_eq!(world.player().position(), Point3::new(8, 8, 0));
+        }
+    }
+
+    #[test]
+    fn rejected_boundaries_and_unknown_entity_do_not_mutate() {
+        let mut world = World::new();
+        assert_eq!(
+            world.decide_move(id(2), direction(2)),
+            Err(WorldError::NotFound(id(2)))
+        );
+        for (start, raw, target) in [
+            (Point3::new(0, 0, -4), 7, Point3::new(-1, -1, -4)),
+            (Point3::new(15, 15, 9), 3, Point3::new(16, 16, 9)),
+        ] {
+            world.insert_entity(id(2), start).unwrap();
+            let decision = world.decide_move(id(2), direction(raw)).unwrap();
+            assert_eq!(decision.state, MoveState::RejectedOutOfBounds);
+            assert_eq!(decision.target, target);
+            assert_eq!(world.lookup(id(2)).unwrap().position(), start);
+            assert_eq!(
+                world.apply_move(decision),
+                Err(WorldError::OutOfBounds {
+                    entity: id(2),
+                    target
+                })
+            );
+            assert_eq!(world.lookup(id(2)).unwrap().position(), start);
+            assert_eq!(world.lookup(id(2)).unwrap().map(), world.map_id());
+            assert_eq!(world.entity_count(), 2);
+            // Reuse the same fixture record after checking both extreme boundaries.
+            world.entities.remove(&id(2));
+        }
+    }
+
+    #[test]
+    fn stale_and_replayed_decisions_fail_even_after_return_to_source() {
+        let mut world = World::new();
+        let east = world.decide_move(id(1), direction(2)).unwrap();
+        let other = world.decide_move(id(1), direction(0)).unwrap();
+        world.apply_move(east).unwrap();
+        assert_eq!(
+            world.apply_move(east),
+            Err(WorldError::StaleDecision(id(1)))
+        );
+        assert_eq!(
+            world.apply_move(other),
+            Err(WorldError::StaleDecision(id(1)))
+        );
+        let west = world.decide_move(id(1), direction(6)).unwrap();
+        world.apply_move(west).unwrap();
+        assert_eq!(world.player().position(), east.source);
+        assert_eq!(
+            world.apply_move(east),
+            Err(WorldError::StaleDecision(id(1)))
+        );
+        assert_eq!(world.player().position(), east.source);
+        assert_eq!(
+            world
+                .decide_move(id(1), direction(2))
+                .unwrap()
+                .source_generation,
+            2
+        );
+    }
+
+    #[test]
+    fn stale_precedes_rejected_state_and_unknown_precedes_stale() {
+        let mut world = World::new();
+        world.insert_entity(id(2), Point3::new(15, 15, 0)).unwrap();
+        let rejected = world.decide_move(id(2), direction(3)).unwrap();
+        let west = world.decide_move(id(2), direction(6)).unwrap();
+        world.apply_move(west).unwrap();
+        assert_eq!(
+            world.apply_move(rejected),
+            Err(WorldError::StaleDecision(id(2)))
+        );
+        world.entities.remove(&id(2));
+        assert_eq!(world.apply_move(rejected), Err(WorldError::NotFound(id(2))));
     }
 }
