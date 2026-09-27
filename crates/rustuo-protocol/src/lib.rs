@@ -102,6 +102,79 @@ mod packet_frame_tests {
     }
 }
 
+#[cfg(test)]
+mod packet_frames_tests {
+    use super::{decode_packet_frames, PacketFrameError, PacketLayout, PacketLayoutTable};
+
+    fn layouts() -> PacketLayoutTable {
+        let mut layouts = PacketLayoutTable::new();
+        layouts
+            .register(0x21, PacketLayout::Fixed { length: 2 })
+            .unwrap();
+        layouts.register(0xBD, PacketLayout::Variable).unwrap();
+        layouts
+    }
+
+    #[test]
+    fn empty_input_has_no_frames_or_remainder() {
+        let input = [];
+        let decoded = decode_packet_frames(&input, &layouts()).unwrap();
+        assert!(decoded.frames.is_empty());
+        assert_eq!(decoded.remaining, &input);
+    }
+
+    #[test]
+    fn consecutive_fixed_frames_are_borrowed_in_order() {
+        let input = [0x21, 0xAA, 0x21, 0xBB];
+        let decoded = decode_packet_frames(&input, &layouts()).unwrap();
+        assert_eq!(decoded.frames, vec![&input[..2], &input[2..]]);
+        assert_eq!(decoded.frames[1].as_ptr(), input[2..].as_ptr());
+        assert!(decoded.remaining.is_empty());
+    }
+
+    #[test]
+    fn variable_frames_are_decoded_in_order() {
+        let input = [0xBD, 0, 3, 0xBD, 0, 5, 0xAA, 0xBB];
+        let decoded = decode_packet_frames(&input, &layouts()).unwrap();
+        assert_eq!(decoded.frames, vec![&input[..3], &input[3..]]);
+        assert!(decoded.remaining.is_empty());
+    }
+
+    #[test]
+    fn incomplete_trailing_header_or_body_is_untouched() {
+        for suffix in [
+            &[0xBD][..],
+            &[0xBD, 0][..],
+            &[0xBD, 0, 5, 0xAA][..],
+            &[0x21][..],
+        ] {
+            let mut input = vec![0x21, 0xAA];
+            input.extend_from_slice(suffix);
+            let decoded = decode_packet_frames(&input, &layouts()).unwrap();
+            assert_eq!(decoded.frames, vec![&input[..2]]);
+            assert_eq!(decoded.remaining, &input[2..]);
+            assert_eq!(decoded.remaining.as_ptr(), input[2..].as_ptr());
+        }
+    }
+
+    #[test]
+    fn error_after_complete_prefix_propagates_unchanged() {
+        let input = [0x21, 0xAA, 0x77];
+        assert_eq!(
+            decode_packet_frames(&input, &layouts()),
+            Err(PacketFrameError::UnknownPacketId { packet_id: 0x77 })
+        );
+        let input = [0x21, 0xAA, 0xBD, 0, 2];
+        assert_eq!(
+            decode_packet_frames(&input, &layouts()),
+            Err(PacketFrameError::InvalidLength {
+                packet_id: 0xBD,
+                length: 2,
+            })
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketLayout {
     Fixed { length: usize },
@@ -160,6 +233,12 @@ pub struct PacketFrame<'a> {
     pub remaining: &'a [u8],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacketFrames<'a> {
+    pub frames: Vec<&'a [u8]>,
+    pub remaining: &'a [u8],
+}
+
 pub fn decode_packet_frame<'a>(
     bytes: &'a [u8],
     layouts: &PacketLayoutTable,
@@ -188,6 +267,19 @@ pub fn decode_packet_frame<'a>(
     }
     let (frame, remaining) = bytes.split_at(frame_length);
     Ok(Some(PacketFrame { frame, remaining }))
+}
+
+pub fn decode_packet_frames<'a>(
+    bytes: &'a [u8],
+    layouts: &PacketLayoutTable,
+) -> Result<PacketFrames<'a>, PacketFrameError> {
+    let mut frames = Vec::new();
+    let mut remaining = bytes;
+    while let Some(decoded) = decode_packet_frame(remaining, layouts)? {
+        frames.push(decoded.frame);
+        remaining = decoded.remaining;
+    }
+    Ok(PacketFrames { frames, remaining })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
