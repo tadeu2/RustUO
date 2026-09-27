@@ -2,6 +2,7 @@
 
 pub mod account_repository;
 pub mod renaissance_login_flow;
+pub mod renaissance_world_entry_session;
 
 use std::collections::VecDeque;
 

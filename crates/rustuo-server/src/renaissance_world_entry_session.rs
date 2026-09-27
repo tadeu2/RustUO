@@ -1,0 +1,101 @@
+//! Per-reconnect, transport-neutral first-packet world-entry composition.
+
+use rustuo_core::ClientVersion;
+use rustuo_protocol::{
+    decode_renaissance_play_character_slot, encode_renaissance_login_confirm,
+    encode_renaissance_old_character_list, OldCharacterListEncodeError,
+    PlayCharacterSlotDecodeError,
+};
+use rustuo_world::World;
+
+use crate::account_repository::LegacyAccountIdentity;
+use crate::RenaissanceReconnectAdmission;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarPresentation {
+    pub name: Vec<u8>,
+    pub body: u16,
+    pub direction: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldEntryError {
+    InvalidPhase,
+    CharacterList(OldCharacterListEncodeError),
+    Decode(PlayCharacterSlotDecodeError),
+    UnsupportedSlot(i32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    AwaitingList,
+    AwaitingSlot,
+    Confirmed,
+}
+
+/// The admission, avatar presentation, and seeded world share one session lifetime.
+pub struct RenaissanceWorldEntrySession {
+    admission: RenaissanceReconnectAdmission<LegacyAccountIdentity>,
+    world: World,
+    avatar: AvatarPresentation,
+    phase: Phase,
+}
+
+impl RenaissanceWorldEntrySession {
+    pub fn new(
+        admission: RenaissanceReconnectAdmission<LegacyAccountIdentity>,
+        avatar: AvatarPresentation,
+    ) -> Self {
+        Self {
+            admission,
+            world: World::renaissance_client_fixture(),
+            avatar,
+            phase: Phase::AwaitingList,
+        }
+    }
+
+    pub fn account(&self) -> &LegacyAccountIdentity {
+        &self.admission.account
+    }
+
+    pub fn client_version(&self) -> ClientVersion {
+        self.admission.client_version
+    }
+
+    pub fn character_list(&mut self) -> Result<Vec<u8>, WorldEntryError> {
+        if self.phase != Phase::AwaitingList {
+            return Err(WorldEntryError::InvalidPhase);
+        }
+        let frame = encode_renaissance_old_character_list(&self.avatar.name)
+            .map_err(WorldEntryError::CharacterList)?;
+        self.phase = Phase::AwaitingSlot;
+        Ok(frame)
+    }
+
+    pub fn play_character(&mut self, frame: &[u8]) -> Result<Vec<u8>, WorldEntryError> {
+        if self.phase != Phase::AwaitingSlot {
+            return Err(WorldEntryError::InvalidPhase);
+        }
+        let slot =
+            decode_renaissance_play_character_slot(frame).map_err(WorldEntryError::Decode)?;
+        if slot != 0 {
+            return Err(WorldEntryError::UnsupportedSlot(slot));
+        }
+
+        let player = self.world.player();
+        let position = player.position();
+        let (width, height) = self.world.map_size();
+        let confirmation = encode_renaissance_login_confirm(
+            player.id().serial().0,
+            self.avatar.body,
+            u16::try_from(position.x).expect("seeded player x fits wire"),
+            u16::try_from(position.y).expect("seeded player y fits wire"),
+            i16::try_from(position.z).expect("seeded player z fits wire"),
+            self.avatar.direction,
+            u16::try_from(width).expect("seeded map width fits wire"),
+            u16::try_from(height).expect("seeded map height fits wire"),
+        );
+        self.phase = Phase::Confirmed;
+        Ok(confirmation)
+    }
+}
