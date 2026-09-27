@@ -28,3 +28,22 @@ Felucca terrain or live-client parity.
 
 Rollback boundary: revert this work-unit commit to remove only the world
 registry, its tests, and this task record; the core values remain intact.
+
+## Player identity correction
+
+The first registry commit exposed `player(id)` as an alias for generic entity
+lookup and counted every entity as a player. The follow-up stores the fixture
+`player_id`, exposes only that entity through no-argument `player()`, and uses
+`lookup(EntityId)` / `insert_entity` for generic records. It removes the
+misleading player count. An item-class entity remains findable without
+changing the seeded player.
+
+- RED: focused world tests exited 101 with 20 expected compile errors for
+  missing `lookup`/`insert_entity` and the old `player(id)` signature.
+- GREEN: focused world tests passed (5/5), including item-class isolation.
+- Workspace: formatting check, workspace check, workspace tests (96 passed,
+  0 failed), and diff check passed with a fresh cache target directory.
+- Runtime harness: N/A — in-memory library registry.
+
+Rollback boundary: revert only the follow-up fix commit to restore the prior
+registry API and tests without altering the core-values foundation.

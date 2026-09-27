@@ -40,6 +40,7 @@ pub enum WorldError {
 #[derive(Debug)]
 pub struct World {
     entities: HashMap<EntityId, Entity>,
+    player_id: EntityId,
 }
 
 impl Default for World {
@@ -50,11 +51,13 @@ impl Default for World {
 
 impl World {
     pub fn new() -> Self {
+        let player_id = EntityId::new(1).expect("fixture player ID is valid");
         let mut world = Self {
             entities: HashMap::new(),
+            player_id,
         };
         world
-            .insert_player(EntityId::new(1).unwrap(), Point3::new(8, 8, 0))
+            .insert_entity(player_id, Point3::new(8, 8, 0))
             .expect("fixture seed is valid");
         world
     }
@@ -75,15 +78,17 @@ impl World {
         self.entities.contains_key(&id)
     }
 
-    pub fn entity(&self, id: EntityId) -> Result<&Entity, WorldError> {
+    pub fn lookup(&self, id: EntityId) -> Result<&Entity, WorldError> {
         self.entities.get(&id).ok_or(WorldError::NotFound(id))
     }
 
-    pub fn player(&self, id: EntityId) -> Result<&Entity, WorldError> {
-        self.entity(id)
+    pub fn player(&self) -> &Entity {
+        self.entities
+            .get(&self.player_id)
+            .expect("fixture player is always present")
     }
 
-    pub fn insert_player(&mut self, id: EntityId, position: Point3) -> Result<(), WorldError> {
+    pub fn insert_entity(&mut self, id: EntityId, position: Point3) -> Result<(), WorldError> {
         if self.contains(id) {
             return Err(WorldError::Duplicate(id));
         }
@@ -105,10 +110,6 @@ impl World {
     }
 
     pub fn entity_count(&self) -> usize {
-        self.entities.len()
-    }
-
-    pub fn player_count(&self) -> usize {
         self.entities.len()
     }
 }
@@ -140,33 +141,27 @@ mod tests {
                 assert!(!world.in_bounds(point));
             }
             assert_eq!(world.entity_count(), 1);
-            assert_eq!(world.player_count(), 1);
             assert!(world.contains(id(1)));
-            let entity = world.entity(id(1)).unwrap();
+            let entity = world.lookup(id(1)).unwrap();
             assert_eq!(entity.id(), id(1));
             assert_eq!(entity.map(), MapId::new(0xfe));
             assert_eq!(entity.position(), Point3::new(8, 8, 0));
-            assert_eq!(world.player(id(1)), Ok(entity));
+            assert_eq!(world.player(), entity);
         }
     }
 
     #[test]
     fn lookup_is_typed_and_duplicate_insertion_preserves_original() {
         let mut world = World::new();
-        assert_eq!(world.entity(id(2)), Err(WorldError::NotFound(id(2))));
-        assert_eq!(world.player(id(2)), Err(WorldError::NotFound(id(2))));
+        assert_eq!(world.lookup(id(2)), Err(WorldError::NotFound(id(2))));
         assert!(!world.contains(id(2)));
 
         assert_eq!(
-            world.insert_player(id(1), Point3::new(3, 4, 5)),
+            world.insert_entity(id(1), Point3::new(3, 4, 5)),
             Err(WorldError::Duplicate(id(1)))
         );
         assert_eq!(world.entity_count(), 1);
-        assert_eq!(world.player_count(), 1);
-        assert_eq!(
-            world.player(id(1)).unwrap().position(),
-            Point3::new(8, 8, 0)
-        );
+        assert_eq!(world.player().position(), Point3::new(8, 8, 0));
     }
 
     #[test]
@@ -179,7 +174,7 @@ mod tests {
             (5, Point3::new(0, 16, 0)),
         ] {
             assert_eq!(
-                world.insert_player(id(raw), point),
+                world.insert_entity(id(raw), point),
                 Err(WorldError::OutOfBounds {
                     entity: id(raw),
                     target: point,
@@ -188,9 +183,9 @@ mod tests {
             assert!(!world.contains(id(raw)));
             assert_eq!(world.entity_count(), 1);
         }
-        world.insert_player(id(2), Point3::new(15, 15, -3)).unwrap();
+        world.insert_entity(id(2), Point3::new(15, 15, -3)).unwrap();
         assert_eq!(
-            world.player(id(2)).unwrap().position(),
+            world.lookup(id(2)).unwrap().position(),
             Point3::new(15, 15, -3)
         );
         assert_eq!(world.entity_count(), 2);
@@ -200,17 +195,31 @@ mod tests {
     fn worlds_own_independent_registries_even_with_identical_ids() {
         let mut first = World::new();
         let mut second = World::new();
-        first.insert_player(id(2), Point3::new(0, 0, 0)).unwrap();
-        second.insert_player(id(2), Point3::new(15, 15, 7)).unwrap();
+        first.insert_entity(id(2), Point3::new(0, 0, 0)).unwrap();
+        second.insert_entity(id(2), Point3::new(15, 15, 7)).unwrap();
         assert_eq!(
-            first.player(id(2)).unwrap().position(),
+            first.lookup(id(2)).unwrap().position(),
             Point3::new(0, 0, 0)
         );
         assert_eq!(
-            second.player(id(2)).unwrap().position(),
+            second.lookup(id(2)).unwrap().position(),
             Point3::new(15, 15, 7)
         );
         assert_eq!(first.entity_count(), 2);
         assert_eq!(second.entity_count(), 2);
+    }
+
+    #[test]
+    fn item_entity_lookup_does_not_change_fixture_player() {
+        let mut world = World::new();
+        let item = id(0x4000_0000);
+        world.insert_entity(item, Point3::new(3, 4, 5)).unwrap();
+
+        assert!(world.contains(item));
+        assert_eq!(world.lookup(item).unwrap().id(), item);
+        assert_eq!(world.lookup(item).unwrap().position(), Point3::new(3, 4, 5));
+        assert_eq!(world.player().id(), id(1));
+        assert_eq!(world.player().position(), Point3::new(8, 8, 0));
+        assert_eq!(world.entity_count(), 2);
     }
 }
