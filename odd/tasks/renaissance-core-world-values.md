@@ -27,3 +27,24 @@ rejects all remaining bits rather than silently discarding them.
 Rollback boundary: revert this work-unit commit to remove the core values and
 their tests plus this task record; no later world or transport behavior is part
 of this commit.
+
+## Serial contract follow-up
+
+The first core-values commit omitted the specified `Serial` classification and
+validation contract, and stored a raw `u32` inside `EntityId`. This follow-up
+adds ordered/hashable `Serial`, explicit sentinel/mobile/item classification,
+`try_allocatable`, and the distinct `InvalidSerial` error. `EntityId` now wraps
+`Serial`, retains `new(raw)` and `raw()`, and exposes `serial()`; its reserved
+range still maps to `InvalidEntityId`. Existing map and direction accessors
+remain unchanged.
+
+- RED: after adding boundary and identity tests, `cargo test -p rustuo-core
+  --lib` exited 101 with missing `Serial` methods, `InvalidSerial`, `Ord`/`Hash`,
+  and `EntityId::serial` (21 expected compile errors).
+- GREEN: focused core library tests passed (7/7).
+- Workspace: formatting check, workspace check, workspace tests (91 passed,
+  0 failed), and `git diff --check` passed using a fresh cache target directory.
+- Runtime harness: N/A — pure core values.
+
+Rollback boundary: revert the follow-up commit independently to restore the
+first core-values commit; no world, protocol, or legacy behavior was changed.

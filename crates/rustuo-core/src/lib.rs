@@ -7,32 +7,59 @@ use std::str::FromStr;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Serial(pub u32);
+
+impl Serial {
+    pub const fn is_sentinel(self) -> bool {
+        self.0 == 0 || self.0 == u32::MAX
+    }
+
+    pub const fn is_mobile(self) -> bool {
+        self.0 >= 1 && self.0 < 0x4000_0000
+    }
+
+    pub const fn is_item(self) -> bool {
+        self.0 >= 0x4000_0000 && self.0 <= 0x7fff_ffff
+    }
+
+    pub const fn try_allocatable(self) -> Result<Self, CoreError> {
+        if self.is_sentinel() {
+            Err(CoreError::SentinelSerial { raw: self.0 })
+        } else if self.is_mobile() || self.is_item() {
+            Ok(self)
+        } else {
+            Err(CoreError::InvalidSerial { raw: self.0 })
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CoreError {
     SentinelSerial { raw: u32 },
+    InvalidSerial { raw: u32 },
     InvalidEntityId { raw: u32 },
     UnknownDirectionBits { raw: u8 },
     MalformedClientVersion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntityId(u32);
+pub struct EntityId(Serial);
 
 impl EntityId {
     pub const fn new(raw: u32) -> Result<Self, CoreError> {
-        if raw == 0 || raw == u32::MAX {
-            Err(CoreError::SentinelSerial { raw })
-        } else if raw <= 0x7fff_ffff {
-            Ok(Self(raw))
-        } else {
-            Err(CoreError::InvalidEntityId { raw })
+        match Serial(raw).try_allocatable() {
+            Ok(serial) => Ok(Self(serial)),
+            Err(CoreError::InvalidSerial { .. }) => Err(CoreError::InvalidEntityId { raw }),
+            Err(error) => Err(error),
         }
     }
 
     pub const fn raw(self) -> u32 {
+        self.serial().0
+    }
+
+    pub const fn serial(self) -> Serial {
         self.0
     }
 }
@@ -192,7 +219,8 @@ impl fmt::Display for ClientVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientVersion, CoreError, Direction, EntityId, MapId, Point3};
+    use super::{ClientVersion, CoreError, Direction, EntityId, MapId, Point3, Serial};
+    use std::collections::HashSet;
     use std::str::FromStr;
 
     #[test]
@@ -233,6 +261,62 @@ mod tests {
         assert_eq!(
             EntityId::new(0x8000_0000),
             Err(CoreError::InvalidEntityId { raw: 0x8000_0000 })
+        );
+    }
+
+    #[test]
+    fn serial_classification_covers_sentinels_mobile_item_and_reserved_boundaries() {
+        for raw in [0, u32::MAX] {
+            let serial = Serial(raw);
+            assert!(serial.is_sentinel());
+            assert!(!serial.is_mobile());
+            assert!(!serial.is_item());
+            assert_eq!(
+                serial.try_allocatable(),
+                Err(CoreError::SentinelSerial { raw })
+            );
+        }
+        for raw in [1, 0x3fff_ffff] {
+            let serial = Serial(raw);
+            assert!(!serial.is_sentinel());
+            assert!(serial.is_mobile());
+            assert!(!serial.is_item());
+            assert_eq!(serial.try_allocatable(), Ok(serial));
+        }
+        for raw in [0x4000_0000, 0x7fff_ffff] {
+            let serial = Serial(raw);
+            assert!(!serial.is_sentinel());
+            assert!(!serial.is_mobile());
+            assert!(serial.is_item());
+            assert_eq!(serial.try_allocatable(), Ok(serial));
+        }
+        for raw in [0x8000_0000, 0xffff_fffe] {
+            let serial = Serial(raw);
+            assert!(!serial.is_sentinel());
+            assert!(!serial.is_mobile());
+            assert!(!serial.is_item());
+            assert_eq!(
+                serial.try_allocatable(),
+                Err(CoreError::InvalidSerial { raw })
+            );
+        }
+    }
+
+    #[test]
+    fn serial_and_entity_id_preserve_raw_order_and_hash_identity() {
+        let low = Serial(1);
+        let high = Serial(0x4000_0000);
+        assert!(low < high);
+        assert_eq!(HashSet::from([low, high, low]).len(), 2);
+
+        let low_entity = EntityId::new(low.0).unwrap();
+        let high_entity = EntityId::new(high.0).unwrap();
+        assert_eq!(low_entity.serial(), low);
+        assert_eq!(high_entity.serial(), high);
+        assert!(low_entity < high_entity);
+        assert_eq!(
+            HashSet::from([low_entity, high_entity, low_entity]).len(),
+            2
         );
     }
 
