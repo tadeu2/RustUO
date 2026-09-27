@@ -736,6 +736,68 @@ pub fn encode_renaissance_play_server_ack(address: u32, port: u16, auth_id: u32)
     writer.into_inner()
 }
 
+const OLD_CHARACTER_LIST_FRAME_LENGTH: u16 = 309;
+const OLD_CHARACTER_NAME_LENGTH: usize = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldCharacterListEncodeError {
+    NameTooLong { length: usize },
+}
+
+/// Encodes the old five-slot list for one pre-seeded character in slot zero.
+pub fn encode_renaissance_old_character_list(
+    name: &[u8],
+) -> Result<Vec<u8>, OldCharacterListEncodeError> {
+    if name.len() > OLD_CHARACTER_NAME_LENGTH {
+        return Err(OldCharacterListEncodeError::NameTooLong { length: name.len() });
+    }
+
+    let mut writer = PacketWriter::new();
+    writer.write_u8(0xA9);
+    writer.write_u16(OLD_CHARACTER_LIST_FRAME_LENGTH);
+    writer.write_u8(5);
+    writer.write_bytes(name);
+    writer.write_bytes(&[0; OLD_CHARACTER_NAME_LENGTH][..OLD_CHARACTER_NAME_LENGTH - name.len()]);
+    writer.write_bytes(&[0; 30]); // Slot-zero password field.
+    writer.write_bytes(&[0; 4 * 60]); // Four empty slots.
+    writer.write_u8(0); // No cities.
+    writer.write_u32(0x0000_0014); // SlotLimit | OneCharacterSlot.
+    Ok(writer.into_inner())
+}
+
+const PLAY_CHARACTER_FRAME_LENGTH: usize = 73;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayCharacterSlotDecodeError {
+    WrongPacketId { packet_id: u8 },
+    Truncated { length: usize },
+    InvalidLength { length: usize },
+}
+
+/// Reads the raw signed slot only; authorization belongs to the session layer.
+pub fn decode_renaissance_play_character_slot(
+    bytes: &[u8],
+) -> Result<i32, PlayCharacterSlotDecodeError> {
+    let Some(&packet_id) = bytes.first() else {
+        return Err(PlayCharacterSlotDecodeError::Truncated { length: 0 });
+    };
+    if packet_id != 0x5D {
+        return Err(PlayCharacterSlotDecodeError::WrongPacketId { packet_id });
+    }
+    if bytes.len() < PLAY_CHARACTER_FRAME_LENGTH {
+        return Err(PlayCharacterSlotDecodeError::Truncated {
+            length: bytes.len(),
+        });
+    }
+    if bytes.len() > PLAY_CHARACTER_FRAME_LENGTH {
+        return Err(PlayCharacterSlotDecodeError::InvalidLength {
+            length: bytes.len(),
+        });
+    }
+
+    Ok(i32::from_be_bytes(bytes[65..69].try_into().unwrap()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1071,6 +1133,71 @@ mod tests {
         assert_eq!(
             decode_renaissance_game_login(&oversized),
             Err(GameLoginDecodeError::InvalidLength { length: 66 })
+        );
+    }
+}
+
+#[cfg(test)]
+mod renaissance_old_character_entry_tests {
+    use super::{
+        decode_renaissance_play_character_slot, encode_renaissance_old_character_list,
+        OldCharacterListEncodeError, PlayCharacterSlotDecodeError,
+    };
+
+    #[test]
+    fn renaissance_old_character_entry_encodes_exact_five_slot_fixture() {
+        let frame = encode_renaissance_old_character_list(&[0x80, b'A']).unwrap();
+        let mut expected = vec![0xA9, 0x01, 0x35, 0x05];
+        expected.extend_from_slice(&[0x80, b'A']);
+        expected.extend_from_slice(&[0; 58]);
+        expected.extend_from_slice(&[0; 240]);
+        expected.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x14]);
+        assert_eq!(frame, expected);
+        assert_eq!(frame.len(), 309);
+    }
+
+    #[test]
+    fn renaissance_old_character_entry_accepts_thirty_bytes_and_rejects_more() {
+        let name = [0xFF; 30];
+        let frame = encode_renaissance_old_character_list(&name).unwrap();
+        assert_eq!(&frame[4..34], &name);
+        assert_eq!(&frame[34..64], &[0; 30]);
+        assert_eq!(
+            encode_renaissance_old_character_list(&[0xFF; 31]),
+            Err(OldCharacterListEncodeError::NameTooLong { length: 31 })
+        );
+    }
+
+    #[test]
+    fn renaissance_old_character_entry_preserves_signed_slot_at_fixed_offset() {
+        let mut frame = [0xAA; 73];
+        frame[0] = 0x5D;
+        frame[65..69].copy_from_slice(&0i32.to_be_bytes());
+        assert_eq!(decode_renaissance_play_character_slot(&frame), Ok(0));
+        frame[65..69].copy_from_slice(&(-2i32).to_be_bytes());
+        assert_eq!(decode_renaissance_play_character_slot(&frame), Ok(-2));
+    }
+
+    #[test]
+    fn renaissance_old_character_entry_rejects_wrong_id_and_nonexact_lengths() {
+        let mut frame = [0; 73];
+        frame[0] = 0x5C;
+        assert_eq!(
+            decode_renaissance_play_character_slot(&frame),
+            Err(PlayCharacterSlotDecodeError::WrongPacketId { packet_id: 0x5C })
+        );
+        frame[0] = 0x5D;
+        assert_eq!(
+            decode_renaissance_play_character_slot(&frame[..72]),
+            Err(PlayCharacterSlotDecodeError::Truncated { length: 72 })
+        );
+        assert_eq!(
+            decode_renaissance_play_character_slot(&[]),
+            Err(PlayCharacterSlotDecodeError::Truncated { length: 0 })
+        );
+        assert_eq!(
+            decode_renaissance_play_character_slot(&[&frame[..], &[0xFF]].concat()),
+            Err(PlayCharacterSlotDecodeError::InvalidLength { length: 74 })
         );
     }
 }
