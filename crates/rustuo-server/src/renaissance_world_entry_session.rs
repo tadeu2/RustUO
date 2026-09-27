@@ -4,7 +4,7 @@ use rustuo_core::ClientVersion;
 use rustuo_protocol::{
     compress_legacy_packet, decode_renaissance_play_character_slot,
     encode_renaissance_login_confirm, encode_renaissance_old_character_list,
-    encode_renaissance_supported_features, OldCharacterListEncodeError,
+    encode_renaissance_supported_features, CompressionError, OldCharacterListEncodeError,
     PlayCharacterSlotDecodeError,
 };
 use rustuo_world::World;
@@ -23,6 +23,7 @@ pub struct AvatarPresentation {
 pub enum WorldEntryError {
     InvalidPhase,
     CharacterList(OldCharacterListEncodeError),
+    Compression(CompressionError),
     Decode(PlayCharacterSlotDecodeError),
     UnsupportedSlot(i32),
 }
@@ -73,11 +74,10 @@ impl RenaissanceWorldEntrySession {
         let frame = encode_renaissance_old_character_list(&self.avatar.name)
             .map_err(WorldEntryError::CharacterList)?;
         let features = encode_renaissance_supported_features(self.feature_flags);
+        let features = compress_legacy_packet(&features).map_err(WorldEntryError::Compression)?;
+        let frame = compress_legacy_packet(&frame).map_err(WorldEntryError::Compression)?;
         self.phase = Phase::AwaitingSlot;
-        Ok([
-            compress_legacy_packet(&features),
-            compress_legacy_packet(&frame),
-        ])
+        Ok([features, frame])
     }
 
     pub fn play_character(&mut self, frame: &[u8]) -> Result<Vec<u8>, WorldEntryError> {
@@ -103,7 +103,9 @@ impl RenaissanceWorldEntrySession {
             u16::try_from(width).expect("seeded map width fits wire"),
             u16::try_from(height).expect("seeded map height fits wire"),
         );
+        let confirmation =
+            compress_legacy_packet(&confirmation).map_err(WorldEntryError::Compression)?;
         self.phase = Phase::Confirmed;
-        Ok(compress_legacy_packet(&confirmation))
+        Ok(confirmation)
     }
 }

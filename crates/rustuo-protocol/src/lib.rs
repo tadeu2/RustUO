@@ -842,8 +842,19 @@ const LEGACY_HUFFMAN: [(u8, u16); 257] = [
     (4, 0x00D),
 ];
 
+const LEGACY_COMPRESSED_PACKET_LIMIT: usize = 0x10000;
+const LEGACY_DEFINITE_OVERFLOW_INPUT: usize = (LEGACY_COMPRESSED_PACKET_LIMIT * 8 - 4) / 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionError {
+    OutputOverflow,
+}
+
 /// Compresses one complete outbound packet; the terminal code closes this packet.
-pub fn compress_legacy_packet(packet: &[u8]) -> Vec<u8> {
+pub fn compress_legacy_packet(packet: &[u8]) -> Result<Vec<u8>, CompressionError> {
+    if packet.len() > LEGACY_DEFINITE_OVERFLOW_INPUT {
+        return Err(CompressionError::OutputOverflow);
+    }
     let mut output = Vec::new();
     let mut pending = 0u8;
     let mut count = 0u8;
@@ -857,6 +868,9 @@ pub fn compress_legacy_packet(packet: &[u8]) -> Vec<u8> {
             pending = (pending << 1) | ((code >> shift) as u8 & 1);
             count += 1;
             if count == 8 {
+                if output.len() == LEGACY_COMPRESSED_PACKET_LIMIT {
+                    return Err(CompressionError::OutputOverflow);
+                }
                 output.push(pending);
                 pending = 0;
                 count = 0;
@@ -864,9 +878,12 @@ pub fn compress_legacy_packet(packet: &[u8]) -> Vec<u8> {
         }
     }
     if count != 0 {
+        if output.len() == LEGACY_COMPRESSED_PACKET_LIMIT {
+            return Err(CompressionError::OutputOverflow);
+        }
         output.push(pending << (8 - count));
     }
-    output
+    Ok(output)
 }
 
 const OLD_CHARACTER_LIST_FRAME_LENGTH: u16 = 309;

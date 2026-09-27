@@ -38,3 +38,15 @@ then compressed `A9`. After valid slot zero, it returns a separately compressed
 This is a pure protocol and transport-neutral session slice. It does not
 complete DoLogin, a socket transport, subsequent world packets, or real-client
 compatibility proof. No runtime listener is launched here.
+
+## Output limit
+
+ServUO's compression buffer is exactly 64 KiB
+(`legacy/Server/Network/Compression.cs:48-62,85-88,118-125,149-156`). It
+reports no compressed packet if writing would exceed that buffer. The pure
+Rust compressor returns a typed `OutputOverflow` error instead of returning
+partial bytes, and the world-entry session propagates that error before a
+phase transition. The 11-bit `0xA6` code makes 47,662 repetitions produce an
+exactly valid 65,536-byte result; 47,663 and 65,535 repetitions exceed the
+limit and are rejected. Small packet vectors and empty-input terminal behavior
+remain unchanged.
