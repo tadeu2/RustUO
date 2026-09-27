@@ -736,6 +736,36 @@ pub fn encode_renaissance_play_server_ack(address: u32, port: u16, auth_id: u32)
     writer.into_inner()
 }
 
+/// Encodes the fixed LoginConfirm frame from already-resolved world-entry fields.
+pub fn encode_renaissance_login_confirm(
+    serial: u32,
+    body: u16,
+    x: u16,
+    y: u16,
+    z: i16,
+    direction: u8,
+    map_width: u16,
+    map_height: u16,
+) -> Vec<u8> {
+    let mut writer = PacketWriter::new();
+    writer.write_u8(0x1B);
+    writer.write_u32(serial);
+    writer.write_u32(0);
+    writer.write_u16(body);
+    writer.write_u16(x);
+    writer.write_u16(y);
+    writer.write_bytes(&z.to_be_bytes());
+    writer.write_u8(direction);
+    writer.write_u8(0);
+    writer.write_u32(u32::MAX);
+    writer.write_u16(0);
+    writer.write_u16(0);
+    writer.write_u16(map_width);
+    writer.write_u16(map_height);
+    writer.write_bytes(&[0; 6]);
+    writer.into_inner()
+}
+
 const OLD_CHARACTER_LIST_FRAME_LENGTH: u16 = 309;
 const OLD_CHARACTER_NAME_LENGTH: usize = 30;
 
@@ -1198,6 +1228,35 @@ mod renaissance_old_character_entry_tests {
         assert_eq!(
             decode_renaissance_play_character_slot(&[&frame[..], &[0xFF]].concat()),
             Err(PlayCharacterSlotDecodeError::InvalidLength { length: 74 })
+        );
+    }
+}
+
+#[cfg(test)]
+mod renaissance_login_confirm_encoder_tests {
+    use super::encode_renaissance_login_confirm;
+
+    #[test]
+    fn login_confirm_encoder_writes_exact_thirty_seven_byte_frame_with_signed_z() {
+        let frame = encode_renaissance_login_confirm(
+            0x1234_5678,
+            0x09AB,
+            0x1357,
+            0x2468,
+            -2,
+            0x87,
+            0x1800,
+            0x1000,
+        );
+
+        assert_eq!(frame.len(), 37);
+        assert_eq!(
+            frame,
+            [
+                0x1B, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0x09, 0xAB, 0x13, 0x57, 0x24, 0x68, 0xFF,
+                0xFE, 0x87, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0x18, 0, 0x10, 0, 0, 0, 0, 0, 0,
+                0,
+            ]
         );
     }
 }
