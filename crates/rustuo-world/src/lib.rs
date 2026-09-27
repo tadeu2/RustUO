@@ -8,6 +8,9 @@ use rustuo_core::{DecodedDirection, EntityId, MapId, Point3};
 
 const FIXTURE_MAP: MapId = MapId::new(0xfe);
 const FIXTURE_SIZE: i32 = 16;
+const TRAMMEL_MAP: MapId = MapId::new(1);
+const TRAMMEL_SIZE: (i32, i32) = (7168, 4096);
+const NEW_HAVEN_BANK: Point3 = Point3::new(3503, 2574, 14);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
@@ -58,6 +61,8 @@ pub struct MoveDecision {
 pub struct World {
     entities: HashMap<EntityId, Entity>,
     player_id: EntityId,
+    map_id: MapId,
+    map_size: (i32, i32),
 }
 
 impl Default for World {
@@ -68,27 +73,41 @@ impl Default for World {
 
 impl World {
     pub fn new() -> Self {
+        Self::seeded(
+            FIXTURE_MAP,
+            (FIXTURE_SIZE, FIXTURE_SIZE),
+            Point3::new(8, 8, 0),
+        )
+    }
+
+    pub fn renaissance_client_fixture() -> Self {
+        Self::seeded(TRAMMEL_MAP, TRAMMEL_SIZE, NEW_HAVEN_BANK)
+    }
+
+    fn seeded(map_id: MapId, map_size: (i32, i32), player_position: Point3) -> Self {
         let player_id = EntityId::new(1).expect("fixture player ID is valid");
         let mut world = Self {
             entities: HashMap::new(),
             player_id,
+            map_id,
+            map_size,
         };
         world
-            .insert_entity(player_id, Point3::new(8, 8, 0))
+            .insert_entity(player_id, player_position)
             .expect("fixture seed is valid");
         world
     }
 
     pub const fn map_id(&self) -> MapId {
-        FIXTURE_MAP
+        self.map_id
     }
 
     pub const fn map_size(&self) -> (i32, i32) {
-        (FIXTURE_SIZE, FIXTURE_SIZE)
+        self.map_size
     }
 
     pub const fn in_bounds(&self, point: Point3) -> bool {
-        point.x >= 0 && point.x < FIXTURE_SIZE && point.y >= 0 && point.y < FIXTURE_SIZE
+        point.x >= 0 && point.x < self.map_size.0 && point.y >= 0 && point.y < self.map_size.1
     }
 
     pub fn contains(&self, id: EntityId) -> bool {
@@ -119,7 +138,7 @@ impl World {
             id,
             Entity {
                 id,
-                map: FIXTURE_MAP,
+                map: self.map_id,
                 position,
                 generation: 0,
             },
@@ -211,6 +230,27 @@ mod tests {
             assert_eq!(entity.position(), Point3::new(8, 8, 0));
             assert_eq!(world.player(), entity);
         }
+    }
+
+    #[test]
+    fn renaissance_client_fixture_uses_trammel_new_haven_and_accepts_eastward_step() {
+        let mut world = World::renaissance_client_fixture();
+        let player = id(1);
+        assert_eq!(world.map_id(), MapId::new(1));
+        assert_eq!(world.map_size(), (7168, 4096));
+        assert!(world.in_bounds(Point3::new(0, 0, 0)));
+        assert!(world.in_bounds(Point3::new(7167, 4095, 0)));
+        assert!(!world.in_bounds(Point3::new(7168, 4095, 0)));
+        assert!(!world.in_bounds(Point3::new(7167, 4096, 0)));
+        assert_eq!(world.entity_count(), 1);
+        assert_eq!(world.player().id(), player);
+        assert_eq!(world.player().map(), MapId::new(1));
+        assert_eq!(world.player().position(), Point3::new(3503, 2574, 14));
+
+        let east = world.decide_move(player, direction(2)).unwrap();
+        world.apply_move(east).unwrap();
+        assert_eq!(world.player().position(), Point3::new(3504, 2574, 14));
+        assert_eq!(world.player().map(), MapId::new(1));
     }
 
     #[test]
