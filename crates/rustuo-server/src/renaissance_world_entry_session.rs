@@ -3,7 +3,8 @@
 use rustuo_core::ClientVersion;
 use rustuo_protocol::{
     compress_legacy_packet, decode_renaissance_play_character_slot,
-    encode_renaissance_login_confirm, encode_renaissance_old_character_list,
+    encode_renaissance_login_confirm, encode_renaissance_map_change,
+    encode_renaissance_map_patches, encode_renaissance_old_character_list,
     encode_renaissance_supported_features, CompressionError, OldCharacterListEncodeError,
     PlayCharacterSlotDecodeError,
 };
@@ -33,6 +34,7 @@ enum Phase {
     AwaitingList,
     AwaitingSlot,
     Confirmed,
+    MapSetupSent,
 }
 
 /// The admission, avatar presentation, and seeded world share one session lifetime.
@@ -107,5 +109,24 @@ impl RenaissanceWorldEntrySession {
             compress_legacy_packet(&confirmation).map_err(WorldEntryError::Compression)?;
         self.phase = Phase::Confirmed;
         Ok(confirmation)
+    }
+
+    /// Emits only the post-LoginConfirm map setup prefix for the seeded fixture.
+    pub fn map_setup_packets(&mut self) -> Result<[Vec<u8>; 3], WorldEntryError> {
+        if self.phase != Phase::Confirmed {
+            return Err(WorldEntryError::InvalidPhase);
+        }
+        let map_change = encode_renaissance_map_change(self.world.map_id().raw());
+        // The seeded world has no patch store or loaded MUL patch files. These
+        // zero counts describe this fixture only, not a general server default.
+        let map_patches = encode_renaissance_map_patches([(0, 0); 4]);
+        let features = encode_renaissance_supported_features(self.feature_flags);
+        let frames = [
+            compress_legacy_packet(&map_change).map_err(WorldEntryError::Compression)?,
+            compress_legacy_packet(&map_patches).map_err(WorldEntryError::Compression)?,
+            compress_legacy_packet(&features).map_err(WorldEntryError::Compression)?,
+        ];
+        self.phase = Phase::MapSetupSent;
+        Ok(frames)
     }
 }

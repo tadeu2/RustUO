@@ -772,6 +772,24 @@ pub fn encode_renaissance_supported_features(feature_flags: u16) -> [u8; 3] {
     [0xB9, high, low]
 }
 
+/// The 0xBF/0x0008 MapChange packet for an explicit facet ID.
+pub fn encode_renaissance_map_change(map_id: u8) -> [u8; 6] {
+    [0xBF, 0, 6, 0, 8, map_id]
+}
+
+/// The 0xBF/0x0018 MapPatches packet. Pairs are static then land blocks,
+/// ordered Felucca, Trammel, Ilshenar, Malas as in ServUO.
+pub fn encode_renaissance_map_patches(patch_counts: [(i32, i32); 4]) -> [u8; 41] {
+    let mut packet = [0; 41];
+    packet[..9].copy_from_slice(&[0xBF, 0, 0x29, 0, 0x18, 0, 0, 0, 4]);
+    for (index, (static_blocks, land_blocks)) in patch_counts.into_iter().enumerate() {
+        let offset = 9 + index * 8;
+        packet[offset..offset + 4].copy_from_slice(&static_blocks.to_be_bytes());
+        packet[offset + 4..offset + 8].copy_from_slice(&land_blocks.to_be_bytes());
+    }
+    packet
+}
+
 // ServUO Compression.cs: pairs are MSB-first bit length and code; index 256 is EOF.
 #[rustfmt::skip]
 const LEGACY_HUFFMAN: [(u8, u16); 257] = [

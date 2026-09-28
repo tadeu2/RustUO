@@ -146,3 +146,46 @@ fn configured_feature_mask_changes_only_first_reconnect_packet() {
     assert_eq!(features, [0xB3, 0x39, 0x96, 0x1D]);
     assert_eq!(list.len(), 85);
 }
+
+#[test]
+fn map_setup_follows_confirm_once_and_preserves_frame_boundaries() {
+    let mut session = admitted_session(0x0003);
+    assert_eq!(
+        session.map_setup_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.reconnect_packets().unwrap();
+    assert_eq!(
+        session.map_setup_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.play_character(&slot_request(0)).unwrap();
+
+    assert_eq!(
+        session.map_setup_packets().unwrap(),
+        [
+            vec![0x80, 0xCE, 0xCE, 0x0F, 0xE8],
+            vec![0x80, 0xCA, 0x51, 0x91, 0x03, 0xA8, 0, 0, 0, 0, 0, 0, 0, 0x06, 0x80,],
+            vec![0xB3, 0x06, 0x9A],
+        ]
+    );
+    assert_eq!(
+        session.map_setup_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.play_character(&slot_request(0)),
+        Err(WorldEntryError::InvalidPhase)
+    );
+}
+
+#[test]
+fn map_setup_reuses_explicit_session_feature_mask() {
+    let mut session = admitted_session(0x1234);
+    session.reconnect_packets().unwrap();
+    session.play_character(&slot_request(0)).unwrap();
+    assert_eq!(
+        session.map_setup_packets().unwrap()[2],
+        [0xB3, 0x39, 0x96, 0x1D]
+    );
+}
