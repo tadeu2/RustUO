@@ -58,6 +58,9 @@ fn admitted_session(feature_flags: u16) -> RenaissanceWorldEntrySession {
             name: b"Alice".to_vec(),
             body: 0x0190,
             direction: 2,
+            hue: 0x0456,
+            old_flags: 0x40,
+            notoriety: 1,
         },
     )
 }
@@ -187,5 +190,41 @@ fn map_setup_reuses_explicit_session_feature_mask() {
     assert_eq!(
         session.map_setup_packets().unwrap()[2],
         [0xB3, 0x39, 0x96, 0x1D]
+    );
+}
+
+#[test]
+fn initial_mobile_prefix_requires_map_setup_and_rejects_replay() {
+    let mut session = admitted_session(0x1234);
+    assert_eq!(
+        session.initial_self_mobile_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.reconnect_packets().unwrap();
+    session.play_character(&slot_request(0)).unwrap();
+    assert_eq!(
+        session.initial_self_mobile_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.map_setup_packets().unwrap();
+    let packets = session.initial_self_mobile_packets().unwrap();
+    // Literal vectors independently packed from legacy/Server/Network/Compression.cs.
+    assert_eq!(
+        packets,
+        [
+            vec![
+                0xC9, 0x1F, 0x40, 0xFF, 0xD7, 0x4B, 0xCA, 0x35, 0xAA, 0xAA, 0x2E, 0xB2, 0xB5, 0x7C,
+                0x03, 0x40
+            ],
+            vec![0xB4, 0x0F, 0xFD, 0x71, 0xD6, 0x56, 0xA9, 0x79, 0x46, 0xB5, 0x41, 0x15, 0x5A],
+        ]
+    );
+    assert_eq!(
+        session.initial_self_mobile_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.map_setup_packets(),
+        Err(WorldEntryError::InvalidPhase)
     );
 }

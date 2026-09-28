@@ -4,7 +4,8 @@ use rustuo_core::ClientVersion;
 use rustuo_protocol::{
     compress_legacy_packet, decode_renaissance_play_character_slot,
     encode_renaissance_login_confirm, encode_renaissance_map_change,
-    encode_renaissance_map_patches, encode_renaissance_old_character_list,
+    encode_renaissance_map_patches, encode_renaissance_mobile_incoming_empty,
+    encode_renaissance_mobile_update_old, encode_renaissance_old_character_list,
     encode_renaissance_supported_features, CompressionError, OldCharacterListEncodeError,
     PlayCharacterSlotDecodeError,
 };
@@ -18,6 +19,9 @@ pub struct AvatarPresentation {
     pub name: Vec<u8>,
     pub body: u16,
     pub direction: u8,
+    pub hue: u16,
+    pub old_flags: u8,
+    pub notoriety: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +39,7 @@ enum Phase {
     AwaitingSlot,
     Confirmed,
     MapSetupSent,
+    InitialMobileSent,
 }
 
 /// The admission, avatar presentation, and seeded world share one session lifetime.
@@ -127,6 +132,46 @@ impl RenaissanceWorldEntrySession {
             compress_legacy_packet(&features).map_err(WorldEntryError::Compression)?,
         ];
         self.phase = Phase::MapSetupSent;
+        Ok(frames)
+    }
+
+    /// Emits only the first self-mobile prefix, before SendEverything and light updates.
+    pub fn initial_self_mobile_packets(&mut self) -> Result<[Vec<u8>; 2], WorldEntryError> {
+        if self.phase != Phase::MapSetupSent {
+            return Err(WorldEntryError::InvalidPhase);
+        }
+        let player = self.world.player();
+        let position = player.position();
+        let serial = player.id().serial().0;
+        let x = u16::try_from(position.x).expect("seeded player x fits wire");
+        let y = u16::try_from(position.y).expect("seeded player y fits wire");
+        let z = i8::try_from(position.z).expect("seeded player z fits old wire");
+        let incoming = encode_renaissance_mobile_incoming_empty(
+            serial,
+            self.avatar.body,
+            x,
+            y,
+            z,
+            self.avatar.direction,
+            self.avatar.hue,
+            self.avatar.old_flags,
+            self.avatar.notoriety,
+        );
+        let update = encode_renaissance_mobile_update_old(
+            serial,
+            self.avatar.body,
+            x,
+            y,
+            z,
+            self.avatar.direction,
+            self.avatar.hue,
+            self.avatar.old_flags,
+        );
+        let frames = [
+            compress_legacy_packet(&incoming).map_err(WorldEntryError::Compression)?,
+            compress_legacy_packet(&update).map_err(WorldEntryError::Compression)?,
+        ];
+        self.phase = Phase::InitialMobileSent;
         Ok(frames)
     }
 }

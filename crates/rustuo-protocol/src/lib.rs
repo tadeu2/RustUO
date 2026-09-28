@@ -790,6 +790,56 @@ pub fn encode_renaissance_map_patches(patch_counts: [(i32, i32); 4]) -> [u8; 41]
     packet
 }
 
+/// Pre-7.0.0 self MobileIncoming with no equipped items, hair, or facial hair.
+/// The empty-equipment assumption belongs to the seeded fixture, not all mobiles.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_renaissance_mobile_incoming_empty(
+    serial: u32,
+    body: u16,
+    x: u16,
+    y: u16,
+    z: i8,
+    direction: u8,
+    hue: u16,
+    old_flags: u8,
+    notoriety: u8,
+) -> [u8; 23] {
+    let mut packet = [0; 23];
+    packet[..3].copy_from_slice(&[0x78, 0, 23]);
+    packet[3..7].copy_from_slice(&serial.to_be_bytes());
+    packet[7..9].copy_from_slice(&body.to_be_bytes());
+    packet[9..11].copy_from_slice(&x.to_be_bytes());
+    packet[11..13].copy_from_slice(&y.to_be_bytes());
+    packet[13..15].copy_from_slice(&[z as u8, direction]);
+    packet[15..17].copy_from_slice(&hue.to_be_bytes());
+    packet[17..19].copy_from_slice(&[old_flags, notoriety]);
+    packet
+}
+
+/// Pre-7.0.0 fixed MobileUpdate. Hue and old flags are resolved by the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_renaissance_mobile_update_old(
+    serial: u32,
+    body: u16,
+    x: u16,
+    y: u16,
+    z: i8,
+    direction: u8,
+    hue: u16,
+    old_flags: u8,
+) -> [u8; 19] {
+    let mut packet = [0; 19];
+    packet[0] = 0x20;
+    packet[1..5].copy_from_slice(&serial.to_be_bytes());
+    packet[5..7].copy_from_slice(&body.to_be_bytes());
+    packet[8..10].copy_from_slice(&hue.to_be_bytes());
+    packet[10] = old_flags;
+    packet[11..13].copy_from_slice(&x.to_be_bytes());
+    packet[13..15].copy_from_slice(&y.to_be_bytes());
+    packet[17..19].copy_from_slice(&[direction, z as u8]);
+    packet
+}
+
 // ServUO Compression.cs: pairs are MSB-first bit length and code; index 256 is EOF.
 #[rustfmt::skip]
 const LEGACY_HUFFMAN: [(u8, u16); 257] = [
