@@ -40,6 +40,7 @@ enum Phase {
     Confirmed,
     MapSetupSent,
     InitialMobileSent,
+    FirstEverythingSent,
 }
 
 /// The admission, avatar presentation, and seeded world share one session lifetime.
@@ -146,17 +147,7 @@ impl RenaissanceWorldEntrySession {
         let x = u16::try_from(position.x).expect("seeded player x fits wire");
         let y = u16::try_from(position.y).expect("seeded player y fits wire");
         let z = i8::try_from(position.z).expect("seeded player z fits old wire");
-        let incoming = encode_renaissance_mobile_incoming_empty(
-            serial,
-            self.avatar.body,
-            x,
-            y,
-            z,
-            self.avatar.direction,
-            self.avatar.hue,
-            self.avatar.old_flags,
-            self.avatar.notoriety,
-        );
+        let incoming = self.encode_fixture_player_incoming()?;
         let update = encode_renaissance_mobile_update_old(
             serial,
             self.avatar.body,
@@ -168,10 +159,38 @@ impl RenaissanceWorldEntrySession {
             self.avatar.old_flags,
         );
         let frames = [
-            compress_legacy_packet(&incoming).map_err(WorldEntryError::Compression)?,
+            incoming,
             compress_legacy_packet(&update).map_err(WorldEntryError::Compression)?,
         ];
         self.phase = Phase::InitialMobileSent;
         Ok(frames)
+    }
+
+    /// Emits the first SendEverything pass for the one-mobile, zero-item fixture.
+    /// The legacy range enumeration includes the player itself.
+    pub fn first_send_everything_packets(&mut self) -> Result<[Vec<u8>; 1], WorldEntryError> {
+        if self.phase != Phase::InitialMobileSent {
+            return Err(WorldEntryError::InvalidPhase);
+        }
+        let incoming = self.encode_fixture_player_incoming()?;
+        self.phase = Phase::FirstEverythingSent;
+        Ok([incoming])
+    }
+
+    fn encode_fixture_player_incoming(&self) -> Result<Vec<u8>, WorldEntryError> {
+        let player = self.world.player();
+        let position = player.position();
+        let incoming = encode_renaissance_mobile_incoming_empty(
+            player.id().serial().0,
+            self.avatar.body,
+            u16::try_from(position.x).expect("seeded player x fits wire"),
+            u16::try_from(position.y).expect("seeded player y fits wire"),
+            i8::try_from(position.z).expect("seeded player z fits old wire"),
+            self.avatar.direction,
+            self.avatar.hue,
+            self.avatar.old_flags,
+            self.avatar.notoriety,
+        );
+        compress_legacy_packet(&incoming).map_err(WorldEntryError::Compression)
     }
 }
