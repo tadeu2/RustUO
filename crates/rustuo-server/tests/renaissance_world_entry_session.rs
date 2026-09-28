@@ -228,3 +228,28 @@ fn initial_mobile_prefix_requires_map_setup_and_rejects_replay() {
         Err(WorldEntryError::InvalidPhase)
     );
 }
+
+#[test]
+fn first_send_everything_repeats_visible_fixture_player_once() {
+    let mut session = admitted_session(0x0003);
+    assert_eq!(
+        session.first_send_everything_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.reconnect_packets().unwrap();
+    session.play_character(&slot_request(0)).unwrap();
+    session.map_setup_packets().unwrap();
+    let [initial_incoming, _] = session.initial_self_mobile_packets().unwrap();
+    assert_eq!(
+        session.first_send_everything_packets().unwrap(),
+        [initial_incoming]
+    );
+    assert_eq!(
+        session.first_send_everything_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.initial_self_mobile_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+}
