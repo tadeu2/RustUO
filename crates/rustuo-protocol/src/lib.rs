@@ -778,6 +778,97 @@ pub fn encode_renaissance_map_change(map_id: u8) -> [u8; 6] {
     [0xBF, 0, 6, 0, 8, map_id]
 }
 
+/// Explicit pre-ML AOS self-status inputs. The world fixture does not model stats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenaissanceAosMobileStatus {
+    pub hits: (u16, u16),
+    pub can_rename: bool,
+    pub female: bool,
+    pub attributes: [u16; 3],
+    pub stamina: (u16, u16),
+    pub mana: (u16, u16),
+    pub gold: u32,
+    pub physical_resistance: u16,
+    pub weight: u16,
+    pub stat_cap: u16,
+    pub followers: (u8, u8),
+    pub elemental_resistances: [u16; 4],
+    pub luck: u16,
+    pub damage: (u16, u16),
+    pub tithing_points: u32,
+}
+
+/// ServUO MobileStatus self packet without ML-only MaxWeight/Race fields.
+pub fn encode_renaissance_aos_mobile_status(
+    serial: u32,
+    name: &str,
+    status: &RenaissanceAosMobileStatus,
+) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(88);
+    frame.extend_from_slice(&[0x11, 0, 88]);
+    frame.extend_from_slice(&serial.to_be_bytes());
+    let mut name_bytes = [0; 30];
+    for (slot, unit) in name_bytes.iter_mut().zip(name.encode_utf16()) {
+        *slot = if unit <= 0x7F { unit as u8 } else { b'?' };
+    }
+    frame.extend_from_slice(&name_bytes);
+    for value in [status.hits.0, status.hits.1] {
+        frame.extend_from_slice(&value.to_be_bytes());
+    }
+    frame.extend_from_slice(&[status.can_rename as u8, 4, status.female as u8]);
+    for value in status.attributes.into_iter().chain([
+        status.stamina.0,
+        status.stamina.1,
+        status.mana.0,
+        status.mana.1,
+    ]) {
+        frame.extend_from_slice(&value.to_be_bytes());
+    }
+    frame.extend_from_slice(&status.gold.to_be_bytes());
+    for value in [status.physical_resistance, status.weight, status.stat_cap] {
+        frame.extend_from_slice(&value.to_be_bytes());
+    }
+    frame.extend_from_slice(&[status.followers.0, status.followers.1]);
+    for value in status.elemental_resistances.into_iter().chain([
+        status.luck,
+        status.damage.0,
+        status.damage.1,
+    ]) {
+        frame.extend_from_slice(&value.to_be_bytes());
+    }
+    frame.extend_from_slice(&status.tithing_points.to_be_bytes());
+    debug_assert_eq!(frame.len(), 88);
+    frame
+}
+
+pub fn encode_renaissance_global_light(level: u8) -> [u8; 2] {
+    [0x4F, level]
+}
+
+pub fn encode_renaissance_personal_light(serial: u32, level: u8) -> [u8; 6] {
+    let mut packet = [0; 6];
+    packet[0] = 0x4E;
+    packet[1..5].copy_from_slice(&serial.to_be_bytes());
+    packet[5] = level;
+    packet
+}
+
+pub fn encode_renaissance_login_complete() -> [u8; 1] {
+    [0x55]
+}
+
+pub fn encode_renaissance_war_mode(enabled: bool) -> [u8; 5] {
+    [0x72, enabled as u8, 0, 0x32, 0]
+}
+
+pub fn encode_renaissance_season_change(season: u8) -> [u8; 3] {
+    [0xBC, season, 1]
+}
+
+pub fn encode_renaissance_current_time(hour: u8, minute: u8, second: u8) -> [u8; 4] {
+    [0x5B, hour, minute, second]
+}
+
 /// The 0xBF/0x0018 MapPatches packet. Pairs are static then land blocks,
 /// ordered Felucca, Trammel, Ilshenar, Malas as in ServUO.
 pub fn encode_renaissance_map_patches(patch_counts: [(i32, i32); 4]) -> [u8; 41] {
@@ -1015,6 +1106,104 @@ pub fn decode_renaissance_play_character_slot(
     }
 
     Ok(i32::from_be_bytes(bytes[65..69].try_into().unwrap()))
+}
+
+/// Raw 0x02 movement request fields; movement validation belongs to the session layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenaissanceMovementRequest {
+    pub direction: u8,
+    pub sequence: u8,
+    pub fastwalk_key: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenaissanceMovementDecodeError {
+    WrongPacketId { packet_id: u8 },
+    Truncated { length: usize },
+    InvalidLength { length: usize },
+}
+
+pub fn decode_renaissance_movement_request(
+    bytes: &[u8],
+) -> Result<RenaissanceMovementRequest, RenaissanceMovementDecodeError> {
+    let Some(&packet_id) = bytes.first() else {
+        return Err(RenaissanceMovementDecodeError::Truncated { length: 0 });
+    };
+    if packet_id != 0x02 {
+        return Err(RenaissanceMovementDecodeError::WrongPacketId { packet_id });
+    }
+    if bytes.len() < 7 {
+        return Err(RenaissanceMovementDecodeError::Truncated {
+            length: bytes.len(),
+        });
+    }
+    if bytes.len() > 7 {
+        return Err(RenaissanceMovementDecodeError::InvalidLength {
+            length: bytes.len(),
+        });
+    }
+
+    Ok(RenaissanceMovementRequest {
+        direction: bytes[1],
+        sequence: bytes[2],
+        fastwalk_key: i32::from_be_bytes(bytes[3..7].try_into().unwrap()),
+    })
+}
+
+pub fn encode_renaissance_movement_ack(sequence: u8, notoriety: u8) -> [u8; 3] {
+    [0x22, sequence, notoriety]
+}
+
+pub fn encode_renaissance_movement_rejection(
+    sequence: u8,
+    x: u16,
+    y: u16,
+    facing: u8,
+    z: i8,
+) -> [u8; 8] {
+    let [x_hi, x_lo] = x.to_be_bytes();
+    let [y_hi, y_lo] = y.to_be_bytes();
+    [0x21, sequence, x_hi, x_lo, y_hi, y_lo, facing, z as u8]
+}
+
+/// Raw 0x73 client ping value. ServUO echoes it unchanged in its ping ACK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenaissancePingRequest {
+    pub sequence: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenaissancePingDecodeError {
+    WrongPacketId { packet_id: u8 },
+    Truncated { length: usize },
+    InvalidLength { length: usize },
+}
+
+pub fn decode_renaissance_ping_request(
+    bytes: &[u8],
+) -> Result<RenaissancePingRequest, RenaissancePingDecodeError> {
+    let Some(&packet_id) = bytes.first() else {
+        return Err(RenaissancePingDecodeError::Truncated { length: 0 });
+    };
+    if packet_id != 0x73 {
+        return Err(RenaissancePingDecodeError::WrongPacketId { packet_id });
+    }
+    if bytes.len() < 2 {
+        return Err(RenaissancePingDecodeError::Truncated {
+            length: bytes.len(),
+        });
+    }
+    if bytes.len() > 2 {
+        return Err(RenaissancePingDecodeError::InvalidLength {
+            length: bytes.len(),
+        });
+    }
+
+    Ok(RenaissancePingRequest { sequence: bytes[1] })
+}
+
+pub fn encode_renaissance_ping_ack(sequence: u8) -> [u8; 2] {
+    [0x73, sequence]
 }
 
 #[cfg(test)]
