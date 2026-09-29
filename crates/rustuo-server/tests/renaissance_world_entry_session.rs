@@ -5,7 +5,7 @@ use rustuo_core::ClientVersion;
 use rustuo_server::account_repository::LegacyXmlAccountRepository;
 use rustuo_server::renaissance_login_flow::RenaissanceLoginFlow;
 use rustuo_server::renaissance_world_entry_session::{
-    AvatarPresentation, RenaissanceWorldEntrySession, WorldEntryError,
+    AvatarPresentation, RenaissanceLoginTailFixture, RenaissanceWorldEntrySession, WorldEntryError,
 };
 use rustuo_server::{AuthIdIssuer, RenaissanceServerEndpoint};
 
@@ -250,6 +250,121 @@ fn first_send_everything_repeats_visible_fixture_player_once() {
     );
     assert_eq!(
         session.initial_self_mobile_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+}
+
+fn login_tail_fixture() -> RenaissanceLoginTailFixture {
+    RenaissanceLoginTailFixture {
+        global_light: 7,
+        personal_light: 9,
+        status: rustuo_protocol::RenaissanceAosMobileStatus {
+            hits: (0x0102, 0x0304),
+            can_rename: false,
+            female: true,
+            attributes: [5, 6, 7],
+            stamina: (8, 9),
+            mana: (10, 11),
+            gold: 12,
+            physical_resistance: 13,
+            weight: 14,
+            stat_cap: 15,
+            followers: (2, 5),
+            elemental_resistances: [16, 17, 18, 19],
+            luck: 20,
+            damage: (21, 22),
+            tithing_points: 23,
+        },
+        war_mode: true,
+        season: 2,
+        current_time: (12, 34, 56),
+    }
+}
+
+#[test]
+fn login_tail_uses_explicit_fixed_time_in_legacy_order_once() {
+    let mut session = admitted_session(0x0003);
+    let fixture = login_tail_fixture();
+    // Every earlier phase rejects the tail without advancing the session.
+    assert_eq!(
+        session.post_first_send_everything_packets(&fixture),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.reconnect_packets().unwrap();
+    assert_eq!(
+        session.post_first_send_everything_packets(&fixture),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.play_character(&slot_request(0)).unwrap();
+    assert_eq!(
+        session.post_first_send_everything_packets(&fixture),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.map_setup_packets().unwrap();
+    assert_eq!(
+        session.post_first_send_everything_packets(&fixture),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.initial_self_mobile_packets().unwrap();
+    assert_eq!(
+        session.post_first_send_everything_packets(&fixture),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.first_send_everything_packets().unwrap();
+
+    // Raw fixtures independently follow legacy DoLogin and the type-four status layout.
+    let incoming = vec![
+        0x78, 0, 23, 0, 0, 0, 1, 1, 0x90, 0x0D, 0xAF, 0x0A, 0x0E, 14, 2, 4, 0x56, 0x40, 1, 0, 0, 0,
+        0,
+    ];
+    let mut status = vec![0x11, 0, 88, 0, 0, 0, 1];
+    status.extend_from_slice(b"Alice");
+    status.extend_from_slice(&[0; 25]);
+    status.extend_from_slice(&[
+        1, 2, 3, 4, 0, 4, 1, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 0, 0, 0, 12, 0, 13, 0, 14,
+        0, 15, 2, 5, 0, 16, 0, 17, 0, 18, 0, 19, 0, 20, 0, 21, 0, 22, 0, 0, 0, 23,
+    ]);
+    let raw = [
+        vec![0x4F, 7],
+        vec![0x4E, 0, 0, 0, 1, 9],
+        vec![0x55],
+        incoming.clone(),
+        status,
+        vec![0x72, 1, 0, 0x32, 0],
+        vec![0xBC, 2, 1],
+        vec![0x5B, 12, 34, 56],
+        vec![0xBF, 0, 6, 0, 8, 1],
+        incoming,
+    ];
+    let expected = raw.map(|frame| rustuo_protocol::compress_legacy_packet(&frame).unwrap());
+    assert_eq!(
+        session
+            .post_first_send_everything_packets(&fixture)
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        session.post_first_send_everything_packets(&fixture),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.first_send_everything_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.initial_self_mobile_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.map_setup_packets(),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.play_character(&slot_request(0)),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    assert_eq!(
+        session.reconnect_packets(),
         Err(WorldEntryError::InvalidPhase)
     );
 }
