@@ -281,6 +281,144 @@ fn login_tail_fixture() -> RenaissanceLoginTailFixture {
     }
 }
 
+fn login_tail_session() -> RenaissanceWorldEntrySession {
+    let mut session = admitted_session(0x0003);
+    session.reconnect_packets().unwrap();
+    session.play_character(&slot_request(0)).unwrap();
+    session.map_setup_packets().unwrap();
+    session.initial_self_mobile_packets().unwrap();
+    session.first_send_everything_packets().unwrap();
+    session
+        .post_first_send_everything_packets(&login_tail_fixture())
+        .unwrap();
+    session
+}
+
+fn movement_request(direction: u8, sequence: u8) -> [u8; 7] {
+    [0x02, direction, sequence, 0, 0, 0, 0]
+}
+
+fn compressed(frame: &[u8]) -> Vec<u8> {
+    rustuo_protocol::compress_legacy_packet(frame).unwrap()
+}
+
+#[test]
+fn movement_requires_login_tail_and_malformed_requests_do_not_advance() {
+    let mut session = admitted_session(0x0003);
+    let request = movement_request(2, 0);
+    assert_eq!(
+        session.movement_request(&request),
+        Err(WorldEntryError::InvalidPhase)
+    );
+    session.reconnect_packets().unwrap();
+    session.play_character(&slot_request(0)).unwrap();
+    session.map_setup_packets().unwrap();
+    session.initial_self_mobile_packets().unwrap();
+    session.first_send_everything_packets().unwrap();
+    session
+        .post_first_send_everything_packets(&login_tail_fixture())
+        .unwrap();
+
+    assert!(matches!(
+        session.movement_request(&request[..6]),
+        Err(WorldEntryError::MovementDecode(_))
+    ));
+    assert!(matches!(
+        session.movement_request(&[0x02, 2, 0, 0, 0, 0, 0, 0]),
+        Err(WorldEntryError::MovementDecode(_))
+    ));
+    assert_eq!(
+        session.movement_request(&request).unwrap(),
+        compressed(&[0x22, 0, 1])
+    );
+    assert_eq!(
+        session.movement_request(&request).unwrap(),
+        compressed(&[0x22, 1, 1])
+    );
+}
+
+#[test]
+fn movement_turn_does_not_step_but_same_facing_steps_with_run_bit() {
+    let mut session = login_tail_session();
+    assert_eq!(
+        session
+            .movement_request(&movement_request(0x84, 0))
+            .unwrap(),
+        compressed(&[0x22, 0, 1])
+    );
+    // A run-bit change alone keeps the same low-three-bit facing and steps south.
+    assert_eq!(
+        session
+            .movement_request(&movement_request(0x04, 1))
+            .unwrap(),
+        compressed(&[0x22, 1, 1])
+    );
+}
+
+#[test]
+fn movement_boundary_rejection_returns_unchanged_position_and_retries_from_zero() {
+    let mut session = login_tail_session();
+    // The first north request turns; following running requests reach y=1.
+    for sequence in 0..2574_u16 {
+        let request = movement_request(0x80, sequence as u8);
+        let acknowledgment_sequence = if sequence == 0 {
+            0
+        } else if sequence % 256 == 0 {
+            1
+        } else {
+            sequence as u8
+        };
+        assert_eq!(
+            session.movement_request(&request).unwrap(),
+            compressed(&[0x22, acknowledgment_sequence, 1])
+        );
+    }
+    assert_eq!(
+        session.movement_request(&movement_request(0, 14)).unwrap(),
+        compressed(&[0x22, 14, 1])
+    );
+    assert_eq!(
+        session.movement_request(&movement_request(0, 15)).unwrap(),
+        compressed(&[0x21, 15, 0x0D, 0xAF, 0, 0, 0, 0x0E])
+    );
+    assert_eq!(
+        session.movement_request(&movement_request(2, 0)).unwrap(),
+        compressed(&[0x22, 0, 1])
+    );
+}
+
+#[test]
+fn movement_rejects_nonzero_initial_sequence_and_accepts_later_mismatch() {
+    let mut session = login_tail_session();
+    assert_eq!(
+        session.movement_request(&movement_request(2, 7)).unwrap(),
+        compressed(&[0x21, 7, 0x0D, 0xAF, 0x0A, 0x0E, 2, 0x0E])
+    );
+    assert_eq!(
+        session.movement_request(&movement_request(2, 0)).unwrap(),
+        compressed(&[0x22, 0, 1])
+    );
+    // The legacy handler checks sequence equality only while the server sequence is zero.
+    assert_eq!(
+        session.movement_request(&movement_request(2, 42)).unwrap(),
+        compressed(&[0x22, 1, 1])
+    );
+}
+
+#[test]
+fn movement_ack_uses_pre_advance_sequence_and_wraps_request_255_to_one() {
+    let mut session = login_tail_session();
+    session.movement_request(&movement_request(2, 0)).unwrap();
+    assert_eq!(
+        session.movement_request(&movement_request(2, 255)).unwrap(),
+        compressed(&[0x22, 1, 1])
+    );
+    assert_eq!(
+        session.movement_request(&movement_request(2, 1)).unwrap(),
+        compressed(&[0x22, 1, 1])
+    );
+}
+
 #[test]
 fn login_tail_uses_explicit_fixed_time_in_legacy_order_once() {
     let mut session = admitted_session(0x0003);

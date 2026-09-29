@@ -1,16 +1,19 @@
 //! Per-reconnect, transport-neutral first-packet world-entry composition.
 
 use rustuo_core::ClientVersion;
+use rustuo_core::Direction;
 use rustuo_protocol::{
-    compress_legacy_packet, decode_renaissance_play_character_slot,
-    encode_renaissance_aos_mobile_status, encode_renaissance_current_time,
-    encode_renaissance_global_light, encode_renaissance_login_complete,
-    encode_renaissance_login_confirm, encode_renaissance_map_change,
-    encode_renaissance_map_patches, encode_renaissance_mobile_incoming_empty,
-    encode_renaissance_mobile_update_old, encode_renaissance_old_character_list,
-    encode_renaissance_personal_light, encode_renaissance_season_change,
-    encode_renaissance_supported_features, encode_renaissance_war_mode, CompressionError,
-    OldCharacterListEncodeError, PlayCharacterSlotDecodeError,
+    compress_legacy_packet, decode_renaissance_movement_request,
+    decode_renaissance_play_character_slot, encode_renaissance_aos_mobile_status,
+    encode_renaissance_current_time, encode_renaissance_global_light,
+    encode_renaissance_login_complete, encode_renaissance_login_confirm,
+    encode_renaissance_map_change, encode_renaissance_map_patches,
+    encode_renaissance_mobile_incoming_empty, encode_renaissance_mobile_update_old,
+    encode_renaissance_movement_ack, encode_renaissance_movement_rejection,
+    encode_renaissance_old_character_list, encode_renaissance_personal_light,
+    encode_renaissance_season_change, encode_renaissance_supported_features,
+    encode_renaissance_war_mode, CompressionError, OldCharacterListEncodeError,
+    PlayCharacterSlotDecodeError, RenaissanceMovementDecodeError,
 };
 use rustuo_world::World;
 
@@ -45,6 +48,7 @@ pub enum WorldEntryError {
     CharacterList(OldCharacterListEncodeError),
     Compression(CompressionError),
     Decode(PlayCharacterSlotDecodeError),
+    MovementDecode(RenaissanceMovementDecodeError),
     UnsupportedSlot(i32),
 }
 
@@ -66,6 +70,7 @@ pub struct RenaissanceWorldEntrySession {
     avatar: AvatarPresentation,
     feature_flags: u16,
     phase: Phase,
+    movement_sequence: u8,
 }
 
 impl RenaissanceWorldEntrySession {
@@ -80,6 +85,7 @@ impl RenaissanceWorldEntrySession {
             avatar,
             feature_flags,
             phase: Phase::AwaitingList,
+            movement_sequence: 0,
         }
     }
 
@@ -231,6 +237,53 @@ impl RenaissanceWorldEntrySession {
         ];
         self.phase = Phase::LoginTailSent;
         Ok(frames)
+    }
+
+    /// Handles one 0x02 movement request for the bounded, map-bounds-only fixture.
+    pub fn movement_request(&mut self, frame: &[u8]) -> Result<Vec<u8>, WorldEntryError> {
+        if self.phase != Phase::LoginTailSent {
+            return Err(WorldEntryError::InvalidPhase);
+        }
+        let request =
+            decode_renaissance_movement_request(frame).map_err(WorldEntryError::MovementDecode)?;
+        let sequence_rejected = self.movement_sequence == 0 && request.sequence != 0;
+        let same_facing = self.avatar.direction & 0x07 == request.direction & 0x07;
+        let moved = if sequence_rejected || !same_facing {
+            !sequence_rejected
+        } else {
+            let direction = Direction::from_raw(request.direction & 0x07)
+                .expect("masked Renaissance direction is valid");
+            let player_id = self.world.player().id();
+            self.world
+                .decide_move(player_id, direction)
+                .ok()
+                .and_then(|decision| self.world.apply_move(decision).ok())
+                .is_some()
+        };
+
+        if !moved {
+            self.movement_sequence = 0;
+            let player = self.world.player();
+            let position = player.position();
+            let packet = encode_renaissance_movement_rejection(
+                request.sequence,
+                u16::try_from(position.x).expect("fixture player x fits wire"),
+                u16::try_from(position.y).expect("fixture player y fits wire"),
+                self.avatar.direction,
+                i8::try_from(position.z).expect("fixture player z fits wire"),
+            );
+            return compress_legacy_packet(&packet).map_err(WorldEntryError::Compression);
+        }
+
+        self.avatar.direction = request.direction;
+        let acknowledgment =
+            encode_renaissance_movement_ack(self.movement_sequence, self.avatar.notoriety);
+        self.movement_sequence = if request.sequence == u8::MAX {
+            1
+        } else {
+            request.sequence + 1
+        };
+        compress_legacy_packet(&acknowledgment).map_err(WorldEntryError::Compression)
     }
 
     fn encode_fixture_player_incoming(&self) -> Result<Vec<u8>, WorldEntryError> {
