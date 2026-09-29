@@ -3,6 +3,7 @@
 pub mod account_repository;
 pub mod reconnect_admission;
 pub mod renaissance_login_flow;
+pub mod renaissance_tcp_runtime;
 pub mod renaissance_world_entry_session;
 
 use rustuo_core::ClientVersion;
@@ -546,6 +547,22 @@ mod reconnect_grant_window_tests {
         assert_eq!(issuer.calls, 3);
         assert_eq!(grants.consume(7), Some(version()));
         assert_eq!(grants.consume(8), Some(other));
+    }
+
+    #[test]
+    fn reconnect_grant_window_rejects_zero_auth_id_without_losing_live_grants() {
+        let mut grants = ReconnectGrantWindow::new();
+        let mut issuer = Issuer {
+            ids: vec![Ok(7), Ok(0)],
+            calls: 0,
+        };
+        assert_eq!(grants.issue(version(), &mut issuer), Ok(7));
+        assert_eq!(
+            grants.issue(version(), &mut issuer),
+            Err(ReconnectGrantError::ZeroAuthId)
+        );
+        assert_eq!(grants.consume(0), None);
+        assert_eq!(grants.consume(7), Some(version()));
     }
 
     #[test]
