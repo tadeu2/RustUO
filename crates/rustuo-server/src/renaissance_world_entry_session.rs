@@ -3,11 +3,14 @@
 use rustuo_core::ClientVersion;
 use rustuo_protocol::{
     compress_legacy_packet, decode_renaissance_play_character_slot,
+    encode_renaissance_aos_mobile_status, encode_renaissance_current_time,
+    encode_renaissance_global_light, encode_renaissance_login_complete,
     encode_renaissance_login_confirm, encode_renaissance_map_change,
     encode_renaissance_map_patches, encode_renaissance_mobile_incoming_empty,
     encode_renaissance_mobile_update_old, encode_renaissance_old_character_list,
-    encode_renaissance_supported_features, CompressionError, OldCharacterListEncodeError,
-    PlayCharacterSlotDecodeError,
+    encode_renaissance_personal_light, encode_renaissance_season_change,
+    encode_renaissance_supported_features, encode_renaissance_war_mode, CompressionError,
+    OldCharacterListEncodeError, PlayCharacterSlotDecodeError,
 };
 use rustuo_world::World;
 
@@ -22,6 +25,18 @@ pub struct AvatarPresentation {
     pub hue: u16,
     pub old_flags: u8,
     pub notoriety: u8,
+}
+
+/// Explicit login-tail values absent from the one-mobile world fixture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenaissanceLoginTailFixture {
+    pub global_light: u8,
+    pub personal_light: u8,
+    pub status: rustuo_protocol::RenaissanceAosMobileStatus,
+    pub war_mode: bool,
+    pub season: u8,
+    /// UTC hour, minute, second, supplied by the caller rather than read here.
+    pub current_time: (u8, u8, u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +56,7 @@ enum Phase {
     MapSetupSent,
     InitialMobileSent,
     FirstEverythingSent,
+    LoginTailSent,
 }
 
 /// The admission, avatar presentation, and seeded world share one session lifetime.
@@ -175,6 +191,46 @@ impl RenaissanceWorldEntrySession {
         let incoming = self.encode_fixture_player_incoming()?;
         self.phase = Phase::FirstEverythingSent;
         Ok([incoming])
+    }
+
+    /// Completes the bounded fixture's DoLogin tail, including second SendEverything.
+    /// Light and status values are fixture inputs, not derived gameplay behavior.
+    pub fn post_first_send_everything_packets(
+        &mut self,
+        fixture: &RenaissanceLoginTailFixture,
+    ) -> Result<[Vec<u8>; 10], WorldEntryError> {
+        if self.phase != Phase::FirstEverythingSent {
+            return Err(WorldEntryError::InvalidPhase);
+        }
+        let serial = self.world.player().id().serial().0;
+        let status = encode_renaissance_aos_mobile_status(
+            serial,
+            &String::from_utf8_lossy(&self.avatar.name),
+            &fixture.status,
+        );
+        let (hour, minute, second) = fixture.current_time;
+        let compress =
+            |frame: &[u8]| compress_legacy_packet(frame).map_err(WorldEntryError::Compression);
+        // PacketHandlers.DoLogin: forced light, complete, self, status, war,
+        // season, UTC time, map, then second SendEverything. The fixture has
+        // no login-event side effects, items, equipment, or fastwalk stack.
+        let frames = [
+            compress(&encode_renaissance_global_light(fixture.global_light))?,
+            compress(&encode_renaissance_personal_light(
+                serial,
+                fixture.personal_light,
+            ))?,
+            compress(&encode_renaissance_login_complete())?,
+            self.encode_fixture_player_incoming()?,
+            compress(&status)?,
+            compress(&encode_renaissance_war_mode(fixture.war_mode))?,
+            compress(&encode_renaissance_season_change(fixture.season))?,
+            compress(&encode_renaissance_current_time(hour, minute, second))?,
+            compress(&encode_renaissance_map_change(self.world.map_id().raw()))?,
+            self.encode_fixture_player_incoming()?,
+        ];
+        self.phase = Phase::LoginTailSent;
+        Ok(frames)
     }
 
     fn encode_fixture_player_incoming(&self) -> Result<Vec<u8>, WorldEntryError> {
