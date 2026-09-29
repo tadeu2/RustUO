@@ -7,6 +7,7 @@ use rustuo_protocol::{
     AccountLoginAckEncodeError, AccountLoginDecodeError, GameLoginDecodeError,
     RenaissanceServerListEntry, ServerSelectionDecodeError,
 };
+use std::sync::{Arc, Mutex};
 
 use crate::account_repository::{
     LegacyAccountError, LegacyAccountIdentity, LegacyXmlAccountRepository,
@@ -29,17 +30,23 @@ pub enum LoginFlowError<E = ()> {
     Selection(SessionSelectionError<E>),
     GameLoginDecode(GameLoginDecodeError),
     Reconnect(ReconnectAdmissionError<LegacyAccountError>),
+    SeedMismatch { connection_seed: u32, auth_id: u32 },
+    SharedStatePoisoned,
+}
+
+struct SharedLoginState {
+    verifier: RepositoryCredentialVerifier<LegacyXmlAccountRepository>,
+    grants: ReconnectGrantWindow,
 }
 
 /// Shared application state; a transport supplies one frame at a time and sends
 /// the returned bytes on the appropriate connection.
 pub struct RenaissanceLoginFlow {
-    verifier: RepositoryCredentialVerifier<LegacyXmlAccountRepository>,
+    shared: Arc<Mutex<SharedLoginState>>,
     server_name: Vec<u8>,
     endpoint: RenaissanceServerEndpoint,
     client_version: ClientVersion,
     login_session: Option<RenaissanceLoginSession>,
-    grants: ReconnectGrantWindow,
 }
 
 impl RenaissanceLoginFlow {
@@ -50,12 +57,26 @@ impl RenaissanceLoginFlow {
         client_version: ClientVersion,
     ) -> Self {
         Self {
-            verifier: RepositoryCredentialVerifier::new(repository),
+            shared: Arc::new(Mutex::new(SharedLoginState {
+                verifier: RepositoryCredentialVerifier::new(repository),
+                grants: ReconnectGrantWindow::new(),
+            })),
             server_name,
             endpoint,
             client_version,
             login_session: None,
-            grants: ReconnectGrantWindow::new(),
+        }
+    }
+
+    /// Creates fresh connection-local login state while retaining process-wide
+    /// credential verification and one-shot reconnect grants.
+    pub fn new_connection(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+            server_name: self.server_name.clone(),
+            endpoint: self.endpoint,
+            client_version: self.client_version,
+            login_session: None,
         }
     }
 
@@ -65,7 +86,11 @@ impl RenaissanceLoginFlow {
         }
         let login =
             decode_renaissance_account_login(frame).map_err(LoginFlowError::AccountLoginDecode)?;
-        match self.verifier.verify(login.username, login.password) {
+        let mut shared = self
+            .shared
+            .lock()
+            .map_err(|_| LoginFlowError::SharedStatePoisoned)?;
+        match shared.verifier.verify(login.username, login.password) {
             Ok(_) => {
                 let response =
                     encode_renaissance_account_login_ack(&[RenaissanceServerListEntry {
@@ -98,8 +123,12 @@ impl RenaissanceLoginFlow {
             .ok_or(LoginFlowError::NotAuthenticated)?;
         let selection = decode_renaissance_server_selection(frame)
             .map_err(LoginFlowError::ServerSelectionDecode)?;
+        let mut shared = self
+            .shared
+            .lock()
+            .map_err(|_| LoginFlowError::SharedStatePoisoned)?;
         session
-            .select_server(selection, issuer, &mut self.grants)
+            .select_server(selection, issuer, &mut shared.grants)
             .map(|prepared| prepared.acknowledgement)
             .map_err(LoginFlowError::Selection)
     }
@@ -110,7 +139,32 @@ impl RenaissanceLoginFlow {
     ) -> Result<RenaissanceReconnectAdmission<LegacyAccountIdentity>, LoginFlowError> {
         let login =
             decode_renaissance_game_login(frame).map_err(LoginFlowError::GameLoginDecode)?;
-        admit_renaissance_reconnect(login, &mut self.grants, &mut self.verifier)
-            .map_err(LoginFlowError::Reconnect)
+        let mut shared = self
+            .shared
+            .lock()
+            .map_err(|_| LoginFlowError::SharedStatePoisoned)?;
+        let SharedLoginState { grants, verifier } = &mut *shared;
+        admit_renaissance_reconnect(login, grants, verifier).map_err(LoginFlowError::Reconnect)
+    }
+
+    pub fn handle_game_login_for_seed(
+        &mut self,
+        connection_seed: u32,
+        frame: &[u8],
+    ) -> Result<RenaissanceReconnectAdmission<LegacyAccountIdentity>, LoginFlowError> {
+        let login =
+            decode_renaissance_game_login(frame).map_err(LoginFlowError::GameLoginDecode)?;
+        if connection_seed == 0 || connection_seed != login.auth_id {
+            return Err(LoginFlowError::SeedMismatch {
+                connection_seed,
+                auth_id: login.auth_id,
+            });
+        }
+        let mut shared = self
+            .shared
+            .lock()
+            .map_err(|_| LoginFlowError::SharedStatePoisoned)?;
+        let SharedLoginState { grants, verifier } = &mut *shared;
+        admit_renaissance_reconnect(login, grants, verifier).map_err(LoginFlowError::Reconnect)
     }
 }

@@ -40,6 +40,9 @@ impl<Version> ReconnectGrantWindow<Version> {
             let auth_id = issuer
                 .issue_auth_id()
                 .map_err(ReconnectGrantError::AuthIdIssuanceFailed)?;
+            if auth_id == 0 {
+                return Err(ReconnectGrantError::ZeroAuthId);
+            }
             if self.grants.iter().any(|(live_id, _)| *live_id == auth_id) {
                 continue;
             }
@@ -68,6 +71,7 @@ impl<Version> ReconnectGrantWindow<Version> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconnectGrantError<E> {
     AuthIdIssuanceFailed(E),
+    ZeroAuthId,
     CollisionExhausted { attempts: usize },
 }
 
