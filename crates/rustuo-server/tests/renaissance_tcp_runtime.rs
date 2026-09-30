@@ -7,7 +7,7 @@ use std::time::Duration;
 use rustuo_server::account_repository::LegacyXmlAccountRepository;
 use rustuo_server::renaissance_tcp_runtime::{RenaissanceTcpRuntime, TcpRuntimeError};
 use rustuo_server::renaissance_world_entry_session::{
-    AvatarPresentation, RenaissanceWorldEntrySession, WorldEntryError,
+    AvatarPresentation, RenaissanceLoginTailFixture, RenaissanceWorldEntrySession, WorldEntryError,
 };
 use rustuo_server::AuthIdIssuer;
 
@@ -85,18 +85,95 @@ fn avatar() -> AvatarPresentation {
     }
 }
 
+fn login_tail_fixture() -> RenaissanceLoginTailFixture {
+    RenaissanceLoginTailFixture {
+        global_light: 7,
+        personal_light: 9,
+        status: rustuo_protocol::RenaissanceAosMobileStatus {
+            hits: (0x0102, 0x0304),
+            can_rename: false,
+            female: true,
+            attributes: [5, 6, 7],
+            stamina: (8, 9),
+            mana: (10, 11),
+            gold: 12,
+            physical_resistance: 13,
+            weight: 14,
+            stat_cap: 15,
+            followers: (2, 5),
+            elemental_resistances: [16, 17, 18, 19],
+            luck: 20,
+            damage: (21, 22),
+            tithing_points: 23,
+        },
+        war_mode: true,
+        season: 2,
+        current_time: (12, 34, 56),
+    }
+}
+
+fn expected_login_tail_packets() -> Vec<Vec<u8>> {
+    let incoming = vec![
+        0xC9, 0x1F, 0x40, 0xFF, 0xD7, 0x4B, 0xCA, 0x35, 0xAA, 0xAA, 0x2E, 0xB2, 0xB5, 0x7C, 0x03,
+        0x40,
+    ];
+    let mut status = vec![0x11, 0, 88, 0, 0, 0, 1];
+    status.extend_from_slice(b"Alice");
+    status.extend_from_slice(&[0; 25]);
+    status.extend_from_slice(&[
+        1, 2, 3, 4, 0, 4, 1, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 0, 0, 0, 12, 0, 13, 0, 14,
+        0, 15, 2, 5, 0, 16, 0, 17, 0, 18, 0, 19, 0, 20, 0, 21, 0, 22, 0, 0, 0, 23,
+    ]);
+    let compress = |frame: &[u8]| rustuo_protocol::compress_legacy_packet(frame).unwrap();
+    let raw_incoming = vec![
+        0x78, 0, 23, 0, 0, 0, 1, 1, 0x90, 0x0D, 0xAF, 0x0A, 0x0E, 14, 2, 4, 0x56, 0x40, 1, 0, 0, 0,
+        0,
+    ];
+    let raw_tail = [
+        vec![0x4F, 7],
+        vec![0x4E, 0, 0, 0, 1, 9],
+        vec![0x55],
+        raw_incoming.clone(),
+        status,
+        vec![0x72, 1, 0, 0x32, 0],
+        vec![0xBC, 2, 1],
+        vec![0x5B, 12, 34, 56],
+        vec![0xBF, 0, 6, 0, 8, 1],
+        raw_incoming,
+    ];
+    let mut packets = vec![
+        vec![0x80, 0xCE, 0xCE, 0x0F, 0xE8],
+        vec![
+            0x80, 0xCA, 0x51, 0x91, 0x03, 0xA8, 0, 0, 0, 0, 0, 0, 0, 0x06, 0x80,
+        ],
+        vec![0xB3, 0x06, 0x9A],
+        incoming.clone(),
+        vec![
+            0xB4, 0x0F, 0xFD, 0x71, 0xD6, 0x56, 0xA9, 0x79, 0x46, 0xB5, 0x41, 0x15, 0x5A,
+        ],
+        incoming,
+    ];
+    packets.extend(raw_tail.iter().map(|frame| compress(frame)));
+    packets
+}
+
+fn movement_request(packet_id: u8) -> [u8; 7] {
+    [packet_id, 2, 0, 0, 0, 0, 0]
+}
+
 fn start_world_entry_server(
     runtime: RenaissanceTcpRuntime,
     mut issuer: Issuer,
+    fixture: RenaissanceLoginTailFixture,
 ) -> std::thread::JoinHandle<
     Result<Option<(TcpStream, RenaissanceWorldEntrySession)>, TcpRuntimeError<()>>,
 > {
     std::thread::spawn(move || {
         assert!(runtime
-            .serve_world_entry_next(&mut issuer, 0x0003, avatar())
+            .serve_world_entry_next(&mut issuer, 0x0003, avatar(), &fixture)
             .unwrap()
             .is_none());
-        runtime.serve_world_entry_next(&mut issuer, 0x0003, avatar())
+        runtime.serve_world_entry_next(&mut issuer, 0x0003, avatar(), &fixture)
     })
 }
 
@@ -121,7 +198,7 @@ fn admit_game_socket(addr: SocketAddr) -> TcpStream {
 fn admitted_game_socket_sends_reconnect_packets_then_slot_zero_confirmation_in_order() {
     let (runtime, issuer) = runtime();
     let addr = runtime.local_addr().unwrap();
-    let server = start_world_entry_server(runtime, issuer);
+    let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
     let mut game_socket = admit_game_socket(addr);
 
     assert_eq!(exact(&mut game_socket, 3), [0xB3, 0x06, 0x9A]);
@@ -148,9 +225,21 @@ fn admitted_game_socket_sends_reconnect_packets_then_slot_zero_confirmation_in_o
             0x40, 0x0B, 0x23, 0x88, 0x00, 0x1A,
         ]
     );
+    for expected in expected_login_tail_packets() {
+        assert_eq!(exact(&mut game_socket, expected.len()), expected);
+    }
+    let mut movements = movement_request(0x02).to_vec();
+    let second_movement = [0x02, 2, 1, 0, 0, 0, 0];
+    movements.extend_from_slice(&second_movement);
+    game_socket.write_all(&movements).unwrap();
+    let movement_ack = rustuo_protocol::compress_legacy_packet(&[0x22, 0, 1]).unwrap();
+    assert_eq!(exact(&mut game_socket, movement_ack.len()), movement_ack);
 
     let (mut handed_off, session) = server.join().unwrap().unwrap().unwrap();
     assert_eq!(session.account().username(), "alice");
+    let mut pending_movement = [0; 7];
+    handed_off.read_exact(&mut pending_movement).unwrap();
+    assert_eq!(pending_movement, second_movement);
     handed_off.write_all(b"still-open").unwrap();
     assert_eq!(exact(&mut game_socket, 10), b"still-open");
 }
@@ -160,7 +249,7 @@ fn world_entry_rejects_nonzero_and_malformed_character_slots() {
     for (slot, packet_id) in [(1i32, 0x5D), (0, 0x7F)] {
         let (runtime, issuer) = runtime();
         let addr = runtime.local_addr().unwrap();
-        let server = start_world_entry_server(runtime, issuer);
+        let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
         let mut game_socket = admit_game_socket(addr);
         exact(&mut game_socket, 3);
         exact(&mut game_socket, 85);
@@ -191,7 +280,7 @@ fn world_entry_rejects_nonzero_and_malformed_character_slots() {
 fn world_entry_reports_truncated_play_request_as_unexpected_eof() {
     let (runtime, issuer) = runtime();
     let addr = runtime.local_addr().unwrap();
-    let server = start_world_entry_server(runtime, issuer);
+    let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
     let mut game_socket = admit_game_socket(addr);
     exact(&mut game_socket, 3);
     exact(&mut game_socket, 85);
@@ -200,6 +289,58 @@ fn world_entry_reports_truncated_play_request_as_unexpected_eof() {
     assert!(matches!(
         server.join().unwrap(),
         Err(TcpRuntimeError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+    ));
+}
+
+#[test]
+fn world_entry_reports_malformed_complete_movement_as_world_entry_error() {
+    let (runtime, issuer) = runtime();
+    let addr = runtime.local_addr().unwrap();
+    let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
+    let mut game_socket = admit_game_socket(addr);
+    exact(&mut game_socket, 3);
+    exact(&mut game_socket, 85);
+    let mut play = [0; 73];
+    play[0] = 0x5D;
+    game_socket.write_all(&play).unwrap();
+    exact(&mut game_socket, 20);
+    for expected in expected_login_tail_packets() {
+        assert_eq!(exact(&mut game_socket, expected.len()), expected);
+    }
+    game_socket.write_all(&movement_request(0x03)).unwrap();
+
+    assert!(matches!(
+        server.join().unwrap(),
+        Err(TcpRuntimeError::WorldEntry(
+            WorldEntryError::MovementDecode(_)
+        ))
+    ));
+    let mut response = [0; 1];
+    assert_eq!(game_socket.read(&mut response).unwrap(), 0);
+}
+
+#[test]
+fn world_entry_reports_truncated_movement_as_unexpected_eof() {
+    let (runtime, issuer) = runtime();
+    let addr = runtime.local_addr().unwrap();
+    let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
+    let mut game_socket = admit_game_socket(addr);
+    exact(&mut game_socket, 3);
+    exact(&mut game_socket, 85);
+    let mut play = [0; 73];
+    play[0] = 0x5D;
+    game_socket.write_all(&play).unwrap();
+    exact(&mut game_socket, 20);
+    for expected in expected_login_tail_packets() {
+        assert_eq!(exact(&mut game_socket, expected.len()), expected);
+    }
+    game_socket.write_all(&movement_request(0x02)[..6]).unwrap();
+    drop(game_socket);
+
+    assert!(matches!(
+        server.join().unwrap(),
+        Err(TcpRuntimeError::Io(error))
+            if error.kind() == std::io::ErrorKind::UnexpectedEof
     ));
 }
 
