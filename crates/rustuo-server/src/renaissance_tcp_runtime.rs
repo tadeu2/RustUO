@@ -6,11 +6,15 @@ use rustuo_core::ClientVersion;
 
 use crate::account_repository::LegacyXmlAccountRepository;
 use crate::renaissance_login_flow::{LoginFlowError, RenaissanceLoginFlow};
+use crate::renaissance_world_entry_session::{
+    AvatarPresentation, RenaissanceWorldEntrySession, WorldEntryError,
+};
 use crate::{AuthIdIssuer, RenaissanceReconnectAdmission, RenaissanceServerEndpoint};
 
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCOUNT_LOGIN_LENGTH: usize = 62;
 const GAME_LOGIN_LENGTH: usize = 65;
+const PLAY_CHARACTER_LENGTH: usize = 73;
 
 #[derive(Debug)]
 pub enum TcpRuntimeError<E> {
@@ -20,6 +24,7 @@ pub enum TcpRuntimeError<E> {
     AccountLogin(LoginFlowError<()>),
     ServerSelection(LoginFlowError<E>),
     GameLogin(LoginFlowError<()>),
+    WorldEntry(WorldEntryError),
 }
 
 pub struct RenaissanceTcpRuntime {
@@ -122,5 +127,39 @@ impl RenaissanceTcpRuntime {
             }
             id => Err(TcpRuntimeError::UnsupportedFirstPacket(id)),
         }
+    }
+
+    /// Completes one admitted reconnect's bounded character-selection handshake.
+    /// Login and redirect connections still return `None`; successful world-entry
+    /// returns the same open game socket with its confirmed session.
+    pub fn serve_world_entry_next<I: AuthIdIssuer>(
+        &self,
+        issuer: &mut I,
+        feature_flags: u16,
+        avatar: AvatarPresentation,
+    ) -> Result<Option<(TcpStream, RenaissanceWorldEntrySession)>, TcpRuntimeError<I::Error>> {
+        let Some((mut stream, admission)) = self.serve_next(issuer)? else {
+            return Ok(None);
+        };
+        let mut session = RenaissanceWorldEntrySession::new(admission, feature_flags, avatar);
+        for packet in session
+            .reconnect_packets()
+            .map_err(TcpRuntimeError::WorldEntry)?
+        {
+            stream.write_all(&packet).map_err(TcpRuntimeError::Io)?;
+        }
+
+        let mut play_character = [0; PLAY_CHARACTER_LENGTH];
+        stream
+            .read_exact(&mut play_character)
+            .map_err(TcpRuntimeError::Io)?;
+        let confirmation = session
+            .play_character(&play_character)
+            .map_err(TcpRuntimeError::WorldEntry)?;
+        stream
+            .write_all(&confirmation)
+            .map_err(TcpRuntimeError::Io)?;
+
+        Ok(Some((stream, session)))
     }
 }
