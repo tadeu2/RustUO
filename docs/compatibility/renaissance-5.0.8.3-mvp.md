@@ -27,7 +27,8 @@ RustUO may authenticate from legacy XML and use one pre-seeded in-memory avatar,
 without implementing normal character selection. ServUO source **does not prove**
 that an actual 5.0.8.3 client will accept world-entry packets without first
 receiving `0xA9` and sending `0x5D`. A real-client smoke test must resolve this.
-The present compatibility tests pin only existing public seed, packet, selection
-and reconnect APIs. They do not establish TCP composition, compression, world
-entry, movement response encoding, or live-client acceptance; those belong to
-R5-MVP-02 through R5-MVP-04.
+RustUO's compatibility and loopback tests exercise seed handling, packet layouts,
+TCP login/reconnect composition, compression, world entry, and a movement
+request/response using synthetic wire fixtures. They do not establish that an
+actual 5.0.8.3 client accepts the pre-seeded spawn or completes the exchange;
+that real-client acceptance remains the R5-MVP-04 gate.
