@@ -355,7 +355,7 @@ fn admit_game_socket(addr: SocketAddr) -> TcpStream {
 }
 
 #[test]
-fn admitted_game_socket_sends_reconnect_packets_then_slot_zero_confirmation_in_order() {
+fn admitted_game_socket_echoes_pings_before_movement_and_keeps_socket_open() {
     let (runtime, issuer) = runtime();
     let addr = runtime.local_addr().unwrap();
     let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
@@ -388,10 +388,21 @@ fn admitted_game_socket_sends_reconnect_packets_then_slot_zero_confirmation_in_o
     for expected in expected_login_tail_packets() {
         assert_eq!(exact(&mut game_socket, expected.len()), expected);
     }
-    let mut movements = movement_request(0x02).to_vec();
+    let mut post_login_packets = vec![0x73, 0xA5, 0x73, 0x00];
+    post_login_packets.extend_from_slice(&movement_request(0x02));
     let second_movement = [0x02, 2, 1, 0, 0, 0, 0];
-    movements.extend_from_slice(&second_movement);
-    game_socket.write_all(&movements).unwrap();
+    post_login_packets.extend_from_slice(&second_movement);
+    game_socket.write_all(&post_login_packets).unwrap();
+    let first_ping_ack = rustuo_protocol::compress_legacy_packet(&[0x73, 0xA5]).unwrap();
+    assert_eq!(
+        exact(&mut game_socket, first_ping_ack.len()),
+        first_ping_ack
+    );
+    let second_ping_ack = rustuo_protocol::compress_legacy_packet(&[0x73, 0x00]).unwrap();
+    assert_eq!(
+        exact(&mut game_socket, second_ping_ack.len()),
+        second_ping_ack
+    );
     let movement_ack = rustuo_protocol::compress_legacy_packet(&[0x22, 0, 1]).unwrap();
     assert_eq!(exact(&mut game_socket, movement_ack.len()), movement_ack);
 
@@ -402,6 +413,35 @@ fn admitted_game_socket_sends_reconnect_packets_then_slot_zero_confirmation_in_o
     assert_eq!(pending_movement, second_movement);
     handed_off.write_all(b"still-open").unwrap();
     assert_eq!(exact(&mut game_socket, 10), b"still-open");
+}
+
+#[test]
+fn world_entry_echoes_complete_ping_before_rejecting_truncated_ping() {
+    let (runtime, issuer) = runtime();
+    let addr = runtime.local_addr().unwrap();
+    let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
+    let mut game_socket = admit_game_socket(addr);
+    exact(&mut game_socket, 3);
+    exact(&mut game_socket, 85);
+    let mut play = [0; 73];
+    play[0] = 0x5D;
+    game_socket.write_all(&play).unwrap();
+    assert_eq!(exact(&mut game_socket, 20).first(), Some(&0x48));
+    for expected in expected_login_tail_packets() {
+        assert_eq!(exact(&mut game_socket, expected.len()), expected);
+    }
+
+    game_socket.write_all(&[0x73, 0xA5, 0x73]).unwrap();
+    game_socket.shutdown(std::net::Shutdown::Write).unwrap();
+    let ping_ack = rustuo_protocol::compress_legacy_packet(&[0x73, 0xA5]).unwrap();
+    assert_eq!(exact(&mut game_socket, ping_ack.len()), ping_ack);
+    assert!(matches!(
+        server.join().unwrap(),
+        Err(TcpRuntimeError::Io(error))
+            if error.kind() == std::io::ErrorKind::UnexpectedEof
+    ));
+    let mut response = [0; 1];
+    assert_eq!(game_socket.read(&mut response).unwrap(), 0);
 }
 
 #[test]

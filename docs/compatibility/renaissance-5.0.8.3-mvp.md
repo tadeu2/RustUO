@@ -11,6 +11,7 @@ does not assert that an untested client accepts RustUO's proposed direct spawn.
 | Game reconnect | New connection: seed, then first-packet `0x91`, 65 bytes: auth ID and two 30-byte credential fields | `GameLogin` consumes the one-use auth ID, verifies the account again, enables outbound compression, sends supported features and, for this pre-7.0.13 client, `0xA9` old character list. |
 | World entry | `0x5D`, 73-byte character-slot request | `PlayCharacter` binds the account-owned mobile. `DoLogin` sends `0x1B` login confirm, map/feature/mobile state, then `0x55` login complete and further state. |
 | Movement | `0x02`, 7 bytes: direction, sequence, four-byte key | `MovementReq` delegates to `Mobile.Move`. A successful move/turn sends `0x22` sequence/notoriety acknowledgement; rejection sends `0x21` sequence/location correction and resets the sequence. |
+| Ping | `0x73`, 2 bytes: one sequence byte | `PingReq` echoes the sequence in a two-byte `PingAck`. RustUO's loopback runtime now mirrors this while awaiting its first movement frame. |
 
 ## Reference evidence
 
@@ -18,6 +19,7 @@ does not assert that an untested client accepts RustUO's proposed direct spawn.
 - `legacy/Server/Network/PacketHandlers.cs:66-108,1780-1805,2404-2585,2961-3059,3119-3171` — handler registration, account/server/game flow, character play, world entry and movement.
 - `legacy/Server/Network/Packets.cs:4498-4579,4842-4903,4963-4969,5092-5113,5150-5164` — outbound packet identifiers and layouts.
 - `legacy/Server/Network/NetState.cs:215-225,261` — old versus new character-list version boundary.
+- `legacy/Server/Network/PacketHandlers.cs:93,1740-1743`, `legacy/Server/Network/Packets.cs:4474-4497` — two-byte ping request and echoed acknowledgement.
 - `legacy/Server/Mobile.cs:3103-3140,3339-3349` — movement/turn and acknowledgement.
 - `legacy/Scripts/Accounting/Accounts.cs:54-78`, `legacy/Scripts/Accounting/AccountHandler.cs:251-332,334-409`, `legacy/Scripts/Misc/ServerList.cs:29-47` — XML load, credential checks and offered endpoint.
 
@@ -28,7 +30,7 @@ without implementing normal character selection. ServUO source **does not prove*
 that an actual 5.0.8.3 client will accept world-entry packets without first
 receiving `0xA9` and sending `0x5D`. A real-client smoke test must resolve this.
 RustUO's compatibility and loopback tests exercise seed handling, packet layouts,
-TCP login/reconnect composition, compression, world entry, and a movement
-request/response using synthetic wire fixtures. They do not establish that an
-actual 5.0.8.3 client accepts the pre-seeded spawn or completes the exchange;
-that real-client acceptance remains the R5-MVP-04 gate.
+TCP login/reconnect composition, compression, world entry, ping echo, and a
+movement request/response using synthetic wire fixtures. They do not establish
+that an actual 5.0.8.3 client accepts the pre-seeded spawn or completes the
+exchange; that real-client acceptance remains the R5-MVP-04 gate.

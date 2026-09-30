@@ -4,7 +4,7 @@ Build one verified client-to-world path by composing the existing protocol, auth
 
 ## Current status on main
 
-The server now runs a serial, IPv4-loopback-only smoke flow through XML login, server selection/reconnect, seeded-avatar world entry, and one movement exchange. Rust compatibility and loopback tests cover that fixture path. The Renaissance 5.0.8.3 actual-client smoke is still pending, so this is not yet proof that a real client accepts the seeded spawn or completes the exchange.
+The server now runs a serial, IPv4-loopback-only smoke flow through XML login, server selection/reconnect, seeded-avatar world entry, ping echoes while awaiting movement, and one movement exchange. Rust compatibility and loopback tests cover that fixture path. The Renaissance 5.0.8.3 actual-client smoke is still pending, so this is not yet proof that a real client accepts the seeded spawn or completes the exchange.
 
 ## In scope
 

@@ -24,8 +24,9 @@ The executable is a **loopback-only smoke server**, not a production server. It
 loads a ServUO-compatible `accounts.xml` read-only, processes clients serially,
 and uses a fixed one-avatar world/login-tail fixture plus sequential local
 reconnect IDs. After a successful reconnect it expects character slot zero
-(`0x5D`) and serves one movement request before closing that game connection.
-`--once` exits after that movement reply; otherwise it accepts another client.
+(`0x5D`), echoes `0x73` ping packets while awaiting one movement request, then
+closes that game connection. `--once` exits after the movement reply; otherwise
+it accepts another client.
 The default listener is `127.0.0.1:2593`; `--listen` accepts only IPv4 loopback
 addresses. Do not expose this fixture to a network. Passing the protocol tests
 does not prove compatibility with an actual Renaissance client.

@@ -3,6 +3,10 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use rustuo_core::ClientVersion;
+use rustuo_protocol::{
+    compress_legacy_packet, decode_renaissance_ping_request, encode_renaissance_ping_ack,
+    RenaissancePingDecodeError,
+};
 
 use crate::account_repository::LegacyXmlAccountRepository;
 use crate::renaissance_login_flow::{LoginFlowError, RenaissanceLoginFlow};
@@ -16,6 +20,7 @@ const ACCOUNT_LOGIN_LENGTH: usize = 62;
 const GAME_LOGIN_LENGTH: usize = 65;
 const PLAY_CHARACTER_LENGTH: usize = 73;
 const MOVEMENT_LENGTH: usize = 7;
+const PING_LENGTH: usize = 2;
 
 #[derive(Debug)]
 pub enum TcpRuntimeError<E> {
@@ -27,6 +32,7 @@ pub enum TcpRuntimeError<E> {
     ServerSelection(LoginFlowError<E>),
     GameLogin(LoginFlowError<()>),
     WorldEntry(WorldEntryError),
+    PingDecode(RenaissancePingDecodeError),
 }
 
 pub struct RenaissanceTcpRuntime {
@@ -132,9 +138,8 @@ impl RenaissanceTcpRuntime {
     }
 
     /// Completes reconnect, character selection, seeded-world login, and one movement request.
-    /// Login and redirect connections return `None`; successful world-entry blocks until the
-    /// first complete movement frame, sends its response, then returns the same open game socket
-    /// with its login-tail session.
+    /// Login and redirect connections return `None`; successful world-entry answers ping frames
+    /// until the first complete movement frame, then returns the same open game socket.
     pub fn serve_world_entry_next<I: AuthIdIssuer>(
         &self,
         issuer: &mut I,
@@ -189,14 +194,39 @@ impl RenaissanceTcpRuntime {
             stream.write_all(&packet).map_err(TcpRuntimeError::Io)?;
         }
 
-        let mut movement = [0; MOVEMENT_LENGTH];
-        stream
-            .read_exact(&mut movement)
-            .map_err(TcpRuntimeError::Io)?;
-        let reply = session
-            .movement_request(&movement)
-            .map_err(TcpRuntimeError::WorldEntry)?;
-        stream.write_all(&reply).map_err(TcpRuntimeError::Io)?;
+        loop {
+            let mut packet_id = [0];
+            stream
+                .read_exact(&mut packet_id)
+                .map_err(TcpRuntimeError::Io)?;
+
+            if packet_id[0] == 0x73 {
+                let mut ping = [0; PING_LENGTH];
+                ping[0] = packet_id[0];
+                stream
+                    .read_exact(&mut ping[1..])
+                    .map_err(TcpRuntimeError::Io)?;
+                let request =
+                    decode_renaissance_ping_request(&ping).map_err(TcpRuntimeError::PingDecode)?;
+                let reply = compress_legacy_packet(&encode_renaissance_ping_ack(request.sequence))
+                    .map_err(|error| {
+                        TcpRuntimeError::WorldEntry(WorldEntryError::Compression(error))
+                    })?;
+                stream.write_all(&reply).map_err(TcpRuntimeError::Io)?;
+                continue;
+            }
+
+            let mut movement = [0; MOVEMENT_LENGTH];
+            movement[0] = packet_id[0];
+            stream
+                .read_exact(&mut movement[1..])
+                .map_err(TcpRuntimeError::Io)?;
+            let reply = session
+                .movement_request(&movement)
+                .map_err(TcpRuntimeError::WorldEntry)?;
+            stream.write_all(&reply).map_err(TcpRuntimeError::Io)?;
+            break;
+        }
 
         Ok(Some((stream, session)))
     }
