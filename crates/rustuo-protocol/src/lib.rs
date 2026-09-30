@@ -1206,6 +1206,46 @@ pub fn encode_renaissance_ping_ack(sequence: u8) -> [u8; 2] {
     [0x73, sequence]
 }
 
+/// Client-requested 0xC8 world update range before server-side clamping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenaissanceUpdateRangeRequest {
+    pub range: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenaissanceUpdateRangeDecodeError {
+    WrongPacketId { packet_id: u8 },
+    Truncated { length: usize },
+    InvalidLength { length: usize },
+}
+
+pub fn decode_renaissance_update_range_request(
+    bytes: &[u8],
+) -> Result<RenaissanceUpdateRangeRequest, RenaissanceUpdateRangeDecodeError> {
+    let Some(&packet_id) = bytes.first() else {
+        return Err(RenaissanceUpdateRangeDecodeError::Truncated { length: 0 });
+    };
+    if packet_id != 0xC8 {
+        return Err(RenaissanceUpdateRangeDecodeError::WrongPacketId { packet_id });
+    }
+    if bytes.len() < 2 {
+        return Err(RenaissanceUpdateRangeDecodeError::Truncated {
+            length: bytes.len(),
+        });
+    }
+    if bytes.len() > 2 {
+        return Err(RenaissanceUpdateRangeDecodeError::InvalidLength {
+            length: bytes.len(),
+        });
+    }
+
+    Ok(RenaissanceUpdateRangeRequest { range: bytes[1] })
+}
+
+pub fn encode_renaissance_update_range_response(range: u8) -> [u8; 2] {
+    [0xC8, range]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1636,5 +1676,42 @@ mod renaissance_login_confirm_encoder_tests {
                 0,
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod renaissance_update_range_tests {
+    use super::{
+        decode_renaissance_update_range_request, encode_renaissance_update_range_response,
+        RenaissanceUpdateRangeDecodeError, RenaissanceUpdateRangeRequest,
+    };
+
+    #[test]
+    fn update_range_request_decodes_exact_client_range() {
+        assert_eq!(
+            decode_renaissance_update_range_request(&[0xC8, 24]),
+            Ok(RenaissanceUpdateRangeRequest { range: 24 })
+        );
+    }
+
+    #[test]
+    fn update_range_request_rejects_wrong_id_and_nonexact_lengths() {
+        assert_eq!(
+            decode_renaissance_update_range_request(&[0xC9, 24]),
+            Err(RenaissanceUpdateRangeDecodeError::WrongPacketId { packet_id: 0xC9 })
+        );
+        assert_eq!(
+            decode_renaissance_update_range_request(&[0xC8]),
+            Err(RenaissanceUpdateRangeDecodeError::Truncated { length: 1 })
+        );
+        assert_eq!(
+            decode_renaissance_update_range_request(&[0xC8, 24, 1]),
+            Err(RenaissanceUpdateRangeDecodeError::InvalidLength { length: 3 })
+        );
+    }
+
+    #[test]
+    fn update_range_response_encodes_exact_two_byte_packet() {
+        assert_eq!(encode_renaissance_update_range_response(24), [0xC8, 24]);
     }
 }

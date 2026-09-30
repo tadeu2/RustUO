@@ -416,6 +416,42 @@ fn admitted_game_socket_echoes_pings_before_movement_and_keeps_socket_open() {
 }
 
 #[test]
+fn set_update_range_clamps_bounds_and_keeps_the_game_session_open() {
+    let (runtime, issuer) = runtime();
+    let addr = runtime.local_addr().unwrap();
+    let server = start_world_entry_server(runtime, issuer, login_tail_fixture());
+    let mut game_socket = admit_game_socket(addr);
+
+    assert_eq!(exact(&mut game_socket, 3), [0xB3, 0x06, 0x9A]);
+    assert_eq!(exact(&mut game_socket, 85).len(), 85);
+    let mut play = [0; 73];
+    play[0] = 0x5D;
+    game_socket.write_all(&play).unwrap();
+    assert_eq!(exact(&mut game_socket, 20).first(), Some(&0x48));
+    for expected in expected_login_tail_packets() {
+        assert_eq!(exact(&mut game_socket, expected.len()), expected);
+    }
+
+    let mut packets = vec![0xC8, 1, 0xC8, 25, 0xC8, 1, 0xC8, 5, 0x73, 0xA5];
+    packets.extend_from_slice(&movement_request(0x02));
+    game_socket.write_all(&packets).unwrap();
+
+    for expected in [
+        rustuo_protocol::compress_legacy_packet(&[0xC8, 24]).unwrap(),
+        rustuo_protocol::compress_legacy_packet(&[0xC8, 18]).unwrap(),
+        rustuo_protocol::compress_legacy_packet(&[0x73, 0xA5]).unwrap(),
+        rustuo_protocol::compress_legacy_packet(&[0x22, 0, 1]).unwrap(),
+    ] {
+        assert_eq!(exact(&mut game_socket, expected.len()), expected);
+    }
+
+    let (mut handed_off, session) = server.join().unwrap().unwrap().unwrap();
+    assert_eq!(session.account().username(), "alice");
+    handed_off.write_all(b"still-open").unwrap();
+    assert_eq!(exact(&mut game_socket, 10), b"still-open");
+}
+
+#[test]
 fn world_entry_echoes_complete_ping_before_rejecting_truncated_ping() {
     let (runtime, issuer) = runtime();
     let addr = runtime.local_addr().unwrap();

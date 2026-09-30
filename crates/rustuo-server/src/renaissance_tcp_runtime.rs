@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use rustuo_core::ClientVersion;
 use rustuo_protocol::{
-    compress_legacy_packet, decode_renaissance_ping_request, encode_renaissance_ping_ack,
-    RenaissancePingDecodeError,
+    compress_legacy_packet, decode_renaissance_ping_request,
+    decode_renaissance_update_range_request, encode_renaissance_ping_ack,
+    encode_renaissance_update_range_response, RenaissancePingDecodeError,
+    RenaissanceUpdateRangeDecodeError,
 };
 
 use crate::account_repository::LegacyXmlAccountRepository;
@@ -21,6 +23,9 @@ const GAME_LOGIN_LENGTH: usize = 65;
 const PLAY_CHARACTER_LENGTH: usize = 73;
 const MOVEMENT_LENGTH: usize = 7;
 const PING_LENGTH: usize = 2;
+const UPDATE_RANGE_LENGTH: usize = 2;
+const DEFAULT_UPDATE_RANGE: u8 = 18;
+const MAX_UPDATE_RANGE: u8 = 24;
 
 #[derive(Debug)]
 pub enum TcpRuntimeError<E> {
@@ -33,6 +38,7 @@ pub enum TcpRuntimeError<E> {
     GameLogin(LoginFlowError<()>),
     WorldEntry(WorldEntryError),
     PingDecode(RenaissancePingDecodeError),
+    UpdateRangeDecode(RenaissanceUpdateRangeDecodeError),
 }
 
 pub struct RenaissanceTcpRuntime {
@@ -194,6 +200,7 @@ impl RenaissanceTcpRuntime {
             stream.write_all(&packet).map_err(TcpRuntimeError::Io)?;
         }
 
+        let mut update_range = DEFAULT_UPDATE_RANGE;
         loop {
             let mut packet_id = [0];
             stream
@@ -212,6 +219,28 @@ impl RenaissanceTcpRuntime {
                     .map_err(|error| {
                         TcpRuntimeError::WorldEntry(WorldEntryError::Compression(error))
                     })?;
+                stream.write_all(&reply).map_err(TcpRuntimeError::Io)?;
+                continue;
+            }
+
+            if packet_id[0] == 0xC8 {
+                let mut update_range_packet = [0; UPDATE_RANGE_LENGTH];
+                update_range_packet[0] = packet_id[0];
+                stream
+                    .read_exact(&mut update_range_packet[1..])
+                    .map_err(TcpRuntimeError::Io)?;
+                let request = decode_renaissance_update_range_request(&update_range_packet)
+                    .map_err(TcpRuntimeError::UpdateRangeDecode)?;
+                let effective_range = request.range.clamp(DEFAULT_UPDATE_RANGE, MAX_UPDATE_RANGE);
+                if effective_range == update_range {
+                    continue;
+                }
+
+                update_range = effective_range;
+                let response = encode_renaissance_update_range_response(update_range);
+                let reply = compress_legacy_packet(&response).map_err(|error| {
+                    TcpRuntimeError::WorldEntry(WorldEntryError::Compression(error))
+                })?;
                 stream.write_all(&reply).map_err(TcpRuntimeError::Io)?;
                 continue;
             }
