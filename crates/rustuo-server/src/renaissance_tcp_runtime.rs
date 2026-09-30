@@ -19,6 +19,7 @@ const MOVEMENT_LENGTH: usize = 7;
 
 #[derive(Debug)]
 pub enum TcpRuntimeError<E> {
+    Accept(io::Error),
     Io(io::Error),
     InvalidSeed,
     UnsupportedFirstPacket(u8),
@@ -72,7 +73,7 @@ impl RenaissanceTcpRuntime {
         )>,
         TcpRuntimeError<I::Error>,
     > {
-        let (stream, _) = self.listener.accept().map_err(TcpRuntimeError::Io)?;
+        let (stream, _) = self.listener.accept().map_err(TcpRuntimeError::Accept)?;
         stream
             .set_read_timeout(Some(SOCKET_TIMEOUT))
             .map_err(TcpRuntimeError::Io)?;

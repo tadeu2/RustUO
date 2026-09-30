@@ -1,8 +1,11 @@
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use rustuo_server::account_repository::LegacyXmlAccountRepository;
 use rustuo_server::renaissance_tcp_runtime::{RenaissanceTcpRuntime, TcpRuntimeError};
@@ -12,6 +15,67 @@ use rustuo_server::renaissance_world_entry_session::{
 use rustuo_server::AuthIdIssuer;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+struct TempAccounts(std::path::PathBuf);
+
+impl TempAccounts {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "rustuo-server-{}-{}.xml",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(
+            &path,
+            "<accounts><account><username>alice</username><password>secret</password></account></accounts>",
+        )
+        .unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TempAccounts {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn wait_for_exit(child: &mut Child) -> ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server did not finish its one-shot exchange"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn startup_reader(stdout: ChildStdout) -> (String, BufReader<ChildStdout>) {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut output = BufReader::new(stdout);
+        let mut line = String::new();
+        let result = output.read_line(&mut line).map(|_| line);
+        let _ = sender.send((result, output));
+    });
+    let (line, output) = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server did not report readiness within five seconds");
+    (line.expect("could not read server readiness"), output)
+}
 
 struct Issuer(u32);
 impl AuthIdIssuer for Issuer {
@@ -40,6 +104,102 @@ fn runtime() -> (RenaissanceTcpRuntime, Issuer) {
         .unwrap(),
         Issuer(0x1122_3344),
     )
+}
+
+#[test]
+fn executable_serves_one_loopback_login_reconnect_and_movement_exchange() {
+    let accounts = TempAccounts::new();
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_rustuo-server"))
+            .args([
+                "--accounts",
+                accounts.0.to_str().unwrap(),
+                "--listen",
+                "127.0.0.1:0",
+                "--once",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = child.0.stdout.take().unwrap();
+    let (ready, _stdout_reader) = startup_reader(stdout);
+    let address = ready
+        .strip_prefix("LISTENING ")
+        .expect("server should print its loopback address")
+        .trim()
+        .parse::<SocketAddr>()
+        .unwrap();
+
+    drop(client(address));
+
+    let mut account_socket = client(address);
+    account_socket.write_all(&[1, 2, 3, 4]).unwrap();
+    account_socket.write_all(&login()).unwrap();
+    let account_ack = exact(&mut account_socket, 46);
+    assert_eq!(account_ack[0], 0xA8);
+    assert_eq!(account_ack[42..46], [1, 0, 0, 127]);
+    account_socket.write_all(&[0xA0, 0, 0]).unwrap();
+    let redirect = exact(&mut account_socket, 11);
+    assert_eq!(redirect[0], 0x8C);
+    assert_eq!(redirect[1..5], [127, 0, 0, 1]);
+    assert_eq!(
+        u16::from_be_bytes([redirect[5], redirect[6]]),
+        address.port()
+    );
+    let redirected_address = SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::new(redirect[1], redirect[2], redirect[3], redirect[4]),
+        u16::from_be_bytes([redirect[5], redirect[6]]),
+    ));
+    assert_eq!(redirected_address, address);
+    let auth_id = u32::from_be_bytes(redirect[7..11].try_into().unwrap());
+    assert_ne!(auth_id, 0);
+    drop(account_socket);
+
+    let mut game_socket = client(redirected_address);
+    game_socket.write_all(&auth_id.to_be_bytes()).unwrap();
+    game_socket.write_all(&game(auth_id)).unwrap();
+    assert_eq!(exact(&mut game_socket, 3), [0xB3, 0x06, 0x9A]);
+    assert_eq!(exact(&mut game_socket, 85).first(), Some(&0x81));
+    let mut play = [0; 73];
+    play[0] = 0x5D;
+    game_socket.write_all(&play).unwrap();
+    game_socket.write_all(&movement_request(0x02)).unwrap();
+
+    let status = wait_for_exit(&mut child.0);
+    if !status.success() {
+        let mut stderr = String::new();
+        child
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        panic!("server exited with {status}: {stderr}");
+    }
+    let mut server_output = Vec::new();
+    game_socket.read_to_end(&mut server_output).unwrap();
+    let expected_movement_ack = rustuo_protocol::compress_legacy_packet(&[0x22, 0, 1]).unwrap();
+    assert!(server_output.ends_with(&expected_movement_ack));
+}
+
+#[test]
+fn executable_refuses_non_loopback_listeners() {
+    let accounts = TempAccounts::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_rustuo-server"))
+        .args([
+            "--accounts",
+            accounts.0.to_str().unwrap(),
+            "--listen",
+            "0.0.0.0:0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("IPv4 loopback"));
 }
 
 fn client(addr: SocketAddr) -> TcpStream {
