@@ -7,7 +7,7 @@ use rustuo_core::ClientVersion;
 use crate::account_repository::LegacyXmlAccountRepository;
 use crate::renaissance_login_flow::{LoginFlowError, RenaissanceLoginFlow};
 use crate::renaissance_world_entry_session::{
-    AvatarPresentation, RenaissanceWorldEntrySession, WorldEntryError,
+    AvatarPresentation, RenaissanceLoginTailFixture, RenaissanceWorldEntrySession, WorldEntryError,
 };
 use crate::{AuthIdIssuer, RenaissanceReconnectAdmission, RenaissanceServerEndpoint};
 
@@ -15,6 +15,7 @@ const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCOUNT_LOGIN_LENGTH: usize = 62;
 const GAME_LOGIN_LENGTH: usize = 65;
 const PLAY_CHARACTER_LENGTH: usize = 73;
+const MOVEMENT_LENGTH: usize = 7;
 
 #[derive(Debug)]
 pub enum TcpRuntimeError<E> {
@@ -129,14 +130,16 @@ impl RenaissanceTcpRuntime {
         }
     }
 
-    /// Completes one admitted reconnect's bounded character-selection handshake.
-    /// Login and redirect connections still return `None`; successful world-entry
-    /// returns the same open game socket with its confirmed session.
+    /// Completes reconnect, character selection, seeded-world login, and one movement request.
+    /// Login and redirect connections return `None`; successful world-entry blocks until the
+    /// first complete movement frame, sends its response, then returns the same open game socket
+    /// with its login-tail session.
     pub fn serve_world_entry_next<I: AuthIdIssuer>(
         &self,
         issuer: &mut I,
         feature_flags: u16,
         avatar: AvatarPresentation,
+        login_tail: &RenaissanceLoginTailFixture,
     ) -> Result<Option<(TcpStream, RenaissanceWorldEntrySession)>, TcpRuntimeError<I::Error>> {
         let Some((mut stream, admission)) = self.serve_next(issuer)? else {
             return Ok(None);
@@ -159,6 +162,40 @@ impl RenaissanceTcpRuntime {
         stream
             .write_all(&confirmation)
             .map_err(TcpRuntimeError::Io)?;
+
+        for packet in session
+            .map_setup_packets()
+            .map_err(TcpRuntimeError::WorldEntry)?
+        {
+            stream.write_all(&packet).map_err(TcpRuntimeError::Io)?;
+        }
+        for packet in session
+            .initial_self_mobile_packets()
+            .map_err(TcpRuntimeError::WorldEntry)?
+        {
+            stream.write_all(&packet).map_err(TcpRuntimeError::Io)?;
+        }
+        for packet in session
+            .first_send_everything_packets()
+            .map_err(TcpRuntimeError::WorldEntry)?
+        {
+            stream.write_all(&packet).map_err(TcpRuntimeError::Io)?;
+        }
+        for packet in session
+            .post_first_send_everything_packets(login_tail)
+            .map_err(TcpRuntimeError::WorldEntry)?
+        {
+            stream.write_all(&packet).map_err(TcpRuntimeError::Io)?;
+        }
+
+        let mut movement = [0; MOVEMENT_LENGTH];
+        stream
+            .read_exact(&mut movement)
+            .map_err(TcpRuntimeError::Io)?;
+        let reply = session
+            .movement_request(&movement)
+            .map_err(TcpRuntimeError::WorldEntry)?;
+        stream.write_all(&reply).map_err(TcpRuntimeError::Io)?;
 
         Ok(Some((stream, session)))
     }
