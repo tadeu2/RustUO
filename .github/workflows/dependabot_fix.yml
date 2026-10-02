@@ -1,0 +1,32 @@
+name: Dependabot Auto-Merge
+
+on: pull_request
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-latest
+    # Se ejecuta solo si el Pull Request fue abierto por Dependabot
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      # 1. Obtiene los metadatos de Dependabot (versiones, tipo de actualización)
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+
+      # 2. Aprueba automáticamente el Pull Request (Paso obligatorio si requieres aprobaciones)
+      - name: Approve a PR
+        run: gh pr review --approve "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. Activa el auto-merge nativo de GitHub para este Pull Request
+      - name: Enable auto-merge for Dependabot PRs
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
