@@ -1,8 +1,15 @@
 {
   "packages": {
     ".": {
-      "release-type": "rust",
-      "changelog-type": "default"
+      "release-type": "simple",
+      "changelog-type": "default",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        }
+      ]
     }
   },
   "changelog-sections": [
